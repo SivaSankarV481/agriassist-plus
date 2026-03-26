@@ -207,13 +207,11 @@ def parse_intent(text: str, session: dict) -> str:
         if t in ("2","weather"):               return "weather_alert"
         if t in ("3","disease","ai advice"):   return "ai_advice"
         if t in ("4","chemical","chemicals"):  return "chemical_advice"
-        if t in ("5","webapp","web app"):      return "show_webapp"
 
     if state == "post_prediction":
         if t in ("1","weather"):               return "weather_alert"
         if t in ("2","disease","ai advice"):   return "ai_advice"
         if t in ("3","chemical","chemicals"):  return "chemical_advice"
-        if t in ("4","web","webapp","website","full report"): return "show_webapp"
 
     if state == "ask_problem":              return "problem_description"
     if state == "ask_chemical_problem":    return "chemical_problem_description"
@@ -292,12 +290,9 @@ def welcome_message():
         "1️⃣  Price prediction\n"
         "2️⃣  Weather alert\n"
         "3️⃣  Disease & AI advice\n"
-        "4️⃣  Chemical recommendations\n"
-        "5️⃣  Open full web app\n\n"
+        "4️⃣  Chemical recommendations\n\n"
         "Reply with a number *or* type your crop & district.\n"
         "_Example: tomato coimbatore_\n\n"
-        f"🌐 *Full Web App (charts & more):*\n"
-        f"{WEB_APP_URL}\n\n"
         "Type *0* anytime to return to this menu."
     )
 
@@ -360,10 +355,7 @@ def price_result_message(crop, district, prices, yield_loss):
         "1️⃣ Weather alert",
         "2️⃣ Disease & AI advice",
         "3️⃣ Chemical tips",
-        f"4️⃣ Full web app (charts & trends)",
         "0️⃣ Main menu",
-        "",
-        f"🌐 {WEB_APP_URL}",
     ])
 
 def weather_message(district, weather_data):
