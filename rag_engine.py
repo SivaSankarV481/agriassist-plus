@@ -693,8 +693,102 @@ Respond ONLY in this exact JSON format (no markdown fences, no extra text):
             lines = [f"- {a['name']}: {'; '.join(a['reasons'])}" for a in chem_recs["avoid"][:2]]
             avoid_text = "CHEMICALS TO AVOID NOW:\n" + "\n".join(lines)
 
+        # ── Build a focused prompt based on the topic of the query ──
+        q_lower = query.lower()
+
+        if any(k in q_lower for k in ["sell", "wait", "price", "market"]):
+            topic_instruction = f"""Answer ONLY the question: Should the farmer sell now or wait?
+
+Base your answer strictly on these price numbers:
+- Current price: Rs.{prices.get('current', 'N/A')}/Qtl
+- 1 Week forecast: Rs.{prices.get('1week', 'N/A')}/Qtl
+- 1 Month forecast: Rs.{prices.get('1month', 'N/A')}/Qtl
+- Yield loss risk: {yield_loss:.1f}%
+
+Give:
+1. A clear SELL NOW or WAIT recommendation with reason
+2. Best time/market to sell (e.g. Uzhavar Sandhai for premium)
+3. How yield loss risk affects the decision
+
+Do NOT talk about chemicals, diseases, or weather unless directly relevant to the sell decision.
+Keep under 180 words."""
+
+        elif any(k in q_lower for k in ["disease", "watch", "treat", "pest", "symptom"]):
+            topic_instruction = f"""Answer ONLY the question: What diseases or pests should this farmer watch for and how to treat them?
+
+Focus on:
+1. Top 2-3 diseases/pests most common for {crop} in {district} given current weather (Temp {weather.get('temp_max','N/A')}°C, Humidity {weather.get('humidity','N/A')}%, Rainfall {weather.get('rainfall','N/A')}mm)
+2. Key symptoms to watch for (simple descriptions)
+3. Treatment for each: chemical name + dose per litre + timing
+
+Use the knowledge base and chemical data provided.
+Do NOT talk about price, selling decisions, or yield loss percentage.
+Keep under 200 words."""
+
+        elif any(k in q_lower for k in ["profit", "improve", "income", "earn", "revenue"]):
+            topic_instruction = f"""Answer ONLY the question: How can this farmer improve their profit for {crop}?
+
+Focus on:
+1. Price strategies (best market, best time to sell, grading/quality tips)
+2. Input cost reduction tips
+3. One practical step to increase yield or reduce loss
+
+Use these price forecasts:
+- Current: Rs.{prices.get('current', 'N/A')}/Qtl → 1 Month: Rs.{prices.get('1month', 'N/A')}/Qtl
+
+Do NOT talk about specific chemical doses or disease names unless directly tied to profit improvement.
+Keep under 180 words."""
+
+        elif any(k in q_lower for k in ["weather", "rain", "temperature", "humid", "climate"]):
+            topic_instruction = f"""Answer ONLY the question: Is the current weather good for this crop and what should the farmer do?
+
+Current weather data:
+- Temperature: {weather.get('temp_max','N/A')}°C
+- Humidity: {weather.get('humidity','N/A')}%
+- Rainfall (7-day): {weather.get('rainfall','N/A')}mm
+
+Focus on:
+1. Whether these conditions are good or risky for {crop} right now
+2. Specific weather-related risks (e.g. fungal disease from humidity, heat stress, waterlogging)
+3. 2-3 actions the farmer should take based on current weather
+
+Do NOT talk about prices, selling, or general crop advice unrelated to weather.
+Keep under 180 words."""
+
+        elif any(k in q_lower for k in ["harvest", "when", "time to harvest", "ready"]):
+            topic_instruction = f"""Answer ONLY the question: When is the best time to harvest {crop} and how should the farmer decide?
+
+Focus on:
+1. Signs that {crop} is ready to harvest (visual/physical indicators)
+2. Best time of day/season to harvest for quality
+3. How current weather ({weather.get('temp_max','N/A')}°C, Humidity {weather.get('humidity','N/A')}%) affects harvest timing
+4. Post-harvest handling tip to preserve quality
+
+Do NOT talk about chemicals, diseases, or selling prices.
+Keep under 180 words."""
+
+        elif any(k in q_lower for k in ["yield", "loss", "reduce", "production"]):
+            topic_instruction = f"""Answer ONLY the question: How can this farmer reduce yield loss for {crop}?
+
+Current yield loss risk: {yield_loss:.1f}%
+
+Focus on:
+1. The most likely causes of yield loss for {crop} right now given the weather
+2. Top 3 practical steps to reduce yield loss immediately
+3. One preventive measure for the next growing season
+
+Do NOT give general crop advice, price info, or selling tips.
+Keep under 180 words."""
+
+        else:
+            topic_instruction = f"""Answer this specific question for the farmer: {query}
+
+Be direct and practical. Give only information relevant to the question asked.
+Farmer context: {crop} in {district}, yield loss risk {yield_loss:.1f}%.
+Keep under 180 words."""
+
         prompt = f"""You are AgriAssist+, a senior agricultural expert for Tamil Nadu farmers.
-Give practical, specific advice a farmer can act on today.
+Give practical, specific advice a farmer can act on today. Use simple language.
 
 FARMER CONTEXT:
 - Crop: {crop} | District: {district}
@@ -709,16 +803,8 @@ FARMER CONTEXT:
 KNOWLEDGE BASE:
 {knowledge}
 
-FARMER QUERY: {query}
-
-Respond with:
-1. Direct answer to the query
-2. Which chemical to use NOW (name, exact dose per litre + per acre, timing)
-3. Which chemical to AVOID and why (weather-specific)
-4. Expected yield improvement if the recommended chemical is applied
-5. One price/selling tip
-
-Be specific with numbers. Keep under 220 words."""
+INSTRUCTION:
+{topic_instruction}"""
 
         if not self.api_key or self.api_key.strip() in ("", "your_anthropic_api_key_here"):
             answer = self._rule_based(context, docs, query, chem_recs)
@@ -776,63 +862,106 @@ Be specific with numbers. Keep under 220 words."""
             chem_recs = recommend_chemicals(crop, weather, yield_loss)
 
         current = prices.get("current", 0) or 0
-        future  = prices.get("1month", 0)  or 0
+        p1w     = prices.get("1week", 0) or 0
+        future  = prices.get("1month", 0) or 0
         diff    = future - current
         pct     = (diff / current * 100) if current > 0 else 0
+        q_lower = query.lower()
 
-        if pct > 5:
-            price_advice = f"📈 **Price Outlook:** {crop} prices expected to RISE by {pct:.1f}% next month (+Rs.{diff:,.0f}/Qtl). Consider holding stock if storage is available."
-        elif pct < -5:
-            price_advice = f"📉 **Price Outlook:** {crop} prices expected to FALL by {abs(pct):.1f}% next month (Rs.{diff:,.0f}/Qtl). Sell as soon as crop is ready."
+        # ── SELL / WAIT ──
+        if any(k in q_lower for k in ["sell", "wait", "price", "market"]):
+            if pct > 8 and yield_loss <= 15:
+                decision = f"⏳ **WAIT — prices rising {pct:.1f}% next month** (Rs.{future:,.0f}/Qtl). Low yield risk means you can hold safely."
+            elif pct > 3 and yield_loss <= 20:
+                decision = f"📅 **WAIT 1 WEEK** — prices forecast up {pct:.1f}% (Rs.{p1w:,.0f}/Qtl in 1 week). Moderate risk — sell within 7 days."
+            elif yield_loss > 25:
+                decision = f"🚨 **SELL NOW** — high yield loss risk ({yield_loss:.0f}%) means delay costs more than any price gain."
+            else:
+                decision = f"✅ **SELL NOW** — prices stable at Rs.{current:,.0f}/Qtl with no major rise forecast."
+            return (
+                f"{decision}\n\n"
+                f"📊 **Price Summary:**\n"
+                f"  • Current: Rs.{current:,.0f}/Qtl\n"
+                f"  • 1 Week:  Rs.{p1w:,.0f}/Qtl\n"
+                f"  • 1 Month: Rs.{future:,.0f}/Qtl\n\n"
+                f"🛒 **Best markets:** Uzhavar Sandhai gives 10–15% premium over APMC. e-NAM platform available for online selling."
+            )
+
+        # ── DISEASES ──
+        elif any(k in q_lower for k in ["disease", "watch", "treat", "pest", "symptom"]):
+            parts = [f"🦠 **Common diseases to watch for in {crop}:**\n"]
+            for doc in docs:
+                if "disease" in doc.get("topic", "") or "chemical" in doc.get("topic", ""):
+                    parts.append(doc["text"][:300])
+                    break
+            if chem_recs["recommended"]:
+                top = chem_recs["recommended"][0]
+                parts.append(f"\n💊 **Treatment now:** {top['name']} — Mix {top['dose_per_litre']} per litre. {top['timing']}.")
+            return "\n".join(parts)
+
+        # ── PROFIT ──
+        elif any(k in q_lower for k in ["profit", "improve", "income", "earn", "revenue"]):
+            tips = [
+                f"💰 **Profit tips for {crop}:**",
+                f"1. Sell at Uzhavar Sandhai for 10–15% more than APMC price.",
+                f"2. Grade your produce — A-grade fetches Rs.{int(current*1.15):,}/Qtl vs Rs.{current:,.0f}/Qtl for mixed grade.",
+                f"3. Reduce input cost: IPM (neem oil + targeted spray) cuts chemical cost by 25%.",
+            ]
+            if pct > 5:
+                tips.append(f"4. Hold stock if possible — prices rising to Rs.{future:,.0f}/Qtl next month (+{pct:.1f}%).")
+            else:
+                tips.append(f"4. Sell now — prices stable, no major rise expected.")
+            return "\n".join(tips)
+
+        # ── WEATHER ──
+        elif any(k in q_lower for k in ["weather", "rain", "temperature", "humid", "climate"]):
+            notes = "\n".join(f"  • {n}" for n in chem_recs["weather_notes"])
+            temp = weather.get("temp_max", "N/A")
+            hum  = weather.get("humidity", "N/A")
+            rain = weather.get("rainfall", "N/A")
+            status = "✅ Favourable" if not chem_recs["weather_notes"][0].startswith("✅") is False else "⚠️ Caution needed"
+            return (
+                f"🌦️ **Weather for {crop} — {context.get('district','')}:**\n"
+                f"  • Temp: {temp}°C | Humidity: {hum}% | Rainfall: {rain}mm\n\n"
+                f"**Weather alerts:**\n{notes}"
+            )
+
+        # ── HARVEST ──
+        elif any(k in q_lower for k in ["harvest", "when", "time to harvest", "ready"]):
+            return (
+                f"🌾 **Harvest timing for {crop}:**\n\n"
+                f"1. Harvest when crop shows maturity signs (colour change, firmness, dry outer layers depending on crop).\n"
+                f"2. Best time: **early morning** when temperature is coolest — reduces moisture loss and spoilage.\n"
+                f"3. Current weather ({weather.get('temp_max','N/A')}°C, {weather.get('humidity','N/A')}% humidity): "
+                + ("High humidity — harvest quickly and dry produce to prevent mould." if (weather.get('humidity') or 0) > 75
+                   else "Conditions are suitable for harvesting now.") +
+                f"\n4. Post-harvest: store in cool, dry, ventilated area. Sort and grade immediately to get better price."
+            )
+
+        # ── YIELD LOSS ──
+        elif any(k in q_lower for k in ["yield", "loss", "reduce", "production"]):
+            icon = "🔴" if yield_loss > 25 else "🟠" if yield_loss > 10 else "🟢"
+            steps = [
+                f"{icon} **Yield loss risk: {yield_loss:.1f}%**\n",
+                f"**Top steps to reduce yield loss:**",
+                f"1. Apply preventive fungicide/insecticide at first sign of disease — delay of 5 days reduces efficacy 40%.",
+                f"2. Ensure proper drainage — waterlogging causes 20–30% yield loss in most crops.",
+                f"3. Use drip irrigation — saves 40% water and improves yield 20–30%.",
+            ]
+            if chem_recs["recommended"]:
+                top = chem_recs["recommended"][0]
+                steps.append(f"4. **Apply {top['name']} now** ({top['dose_per_litre']} per litre) — expected yield recovery: +{top['yield_gain_pct']}%.")
+            steps.append(f"5. **Next season:** use certified seeds (+30% yield) and get soil tested every 3 years.")
+            return "\n".join(steps)
+
+        # ── GENERIC FALLBACK ──
         else:
-            price_advice = f"➡️ **Price Outlook:** {crop} prices stable around Rs.{current:,.0f}/Qtl. Sell at your convenience."
-
-        weather_section = "\n".join(f"  • {n}" for n in chem_recs["weather_notes"])
-
-        chem_section = ""
-        if chem_recs["recommended"]:
-            chem_lines = []
-            for c in chem_recs["recommended"][:3]:
-                gain_note = f"+{c['yield_gain_pct']}% yield if applied timely"
-                chem_lines.append(
-                    f"  ✅ **{c['name']}** ({c['type']})\n"
-                    f"     • Dose: **{c['dose_per_litre']} per litre** | {c['dose_per_acre']}\n"
-                    f"     • Frequency: {c['frequency']}\n"
-                    f"     • Timing: {c['timing']}\n"
-                    f"     • Yield Impact: **{gain_note}**\n"
-                    f"     • Safety: {c['safety']}"
-                )
-            chem_section = "**✅ Recommended Chemicals (weather-safe):**\n" + "\n\n".join(chem_lines)
-        else:
-            chem_section = "⚠️ **No chemical sprays recommended right now** — current weather conditions are unfavourable for application. Wait for better conditions."
-
-        avoid_section = ""
-        if chem_recs["avoid"]:
-            avoid_lines = []
-            for a in chem_recs["avoid"][:3]:
-                avoid_lines.append(
-                    f"  ❌ **{a['name']}** — {'; '.join(a['reasons'])}\n"
-                    f"     Reason: {a['original_avoid_reason']}"
-                )
-            avoid_section = "**❌ Chemicals to AVOID in Current Weather:**\n" + "\n\n".join(avoid_lines)
-
-        if yield_loss > 25:
-            yield_note = f"🔴 **High yield risk ({yield_loss:.0f}%)** — immediate chemical treatment recommended. Timely application can recover **15–25% of expected loss**."
-        elif yield_loss > 10:
-            yield_note = f"🟠 **Moderate yield risk ({yield_loss:.0f}%)** — preventive treatment advised. Chemical application can improve yield by **10–15%**."
-        else:
-            yield_note = f"🟢 **Low yield risk ({yield_loss:.0f}%)** — crop is in good condition. Maintain regular monitoring."
-
-        parts = [
-            price_advice,
-            f"\n**🌦️ Weather Advisory:**\n{weather_section}",
-            f"\n{yield_note}",
-            f"\n{chem_section}",
-        ]
-        if avoid_section:
-            parts.append(f"\n{avoid_section}")
-
-        return "\n".join(parts)
+            doc_text = docs[0]["text"][:300] if docs else "No specific data found."
+            return (
+                f"📋 **Advice for {crop} — {context.get('district','')}:**\n\n"
+                f"{doc_text}\n\n"
+                f"Current price: Rs.{current:,.0f}/Qtl | Yield risk: {yield_loss:.1f}%"
+            )
 
     def get_chemical_recommendations(self, crop: str, weather: dict, yield_loss: float) -> dict:
         """Public method for direct chemical recommendation from app.py."""
