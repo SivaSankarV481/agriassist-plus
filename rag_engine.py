@@ -565,7 +565,7 @@ Respond ONLY in this exact JSON format (no markdown fences, no extra text):
                         "content-type":      "application/json",
                     },
                     json={
-                        "model":      "claude-sonnet-4-5",
+                        "model":      "claude-sonnet-4-6",
                         "max_tokens": 1200,
                         "messages": [{"role": "user", "content": prompt}],
                     },
@@ -818,7 +818,7 @@ INSTRUCTION:
                         "content-type":      "application/json",
                     },
                     json={
-                        "model":      "claude-sonnet-4-5",
+                        "model":      "claude-sonnet-4-6",
                         "max_tokens": 900,
                         "messages": [{"role": "user", "content": prompt}],
                     },
@@ -1029,7 +1029,7 @@ Rules:
                     "content-type":      "application/json",
                 },
                 json={
-                    "model":      "claude-sonnet-4-5",
+                    "model":      "claude-sonnet-4-6",
                     "max_tokens": 900,
                     "messages": [{"role": "user", "content": prompt}],
                 },
