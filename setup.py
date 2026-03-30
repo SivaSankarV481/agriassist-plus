@@ -34,8 +34,7 @@ def main():
             import shutil
             shutil.copy(".env.example", ".env")
             print("\n  📝 .env file created from .env.example")
-            print("  ⚠️  Edit .env and add your OPENROUTER_API_KEY for full LLM features")
-            print("     (App works without it using rule-based recommendations)")
+            print("  ⚠️  Edit .env and fill in your ANTHROPIC_API_KEY, WHATSAPP_TOKEN, and MySQL credentials.")
 
     # 3. Generate dataset
     run(f"{sys.executable} generate_dataset.py", "Generating Tamil Nadu crop dataset...")
@@ -46,11 +45,12 @@ def main():
     print("\n" + "=" * 50)
     print("  🎉 Setup Complete!")
     print("=" * 50)
-    print("\n  Run the app:")
+    print("\n  Run the Streamlit web app:")
     print("    streamlit run app.py")
-    print("\n  For full AI recommendations:")
-    print("    1. Get free API key from https://openrouter.ai")
-    print("    2. Add to .env: OPENROUTER_API_KEY=your_key_here")
+    print("\n  Run the WhatsApp bot:")
+    print("    python whatsapp_bot.py")
+    print("\n  Run WhatsApp bot in CLI test mode:")
+    print("    python whatsapp_bot.py --cli")
     print("=" * 50)
 
 if __name__ == "__main__":

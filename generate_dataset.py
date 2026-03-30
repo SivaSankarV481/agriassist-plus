@@ -11,7 +11,6 @@ Run:
 import pandas as pd
 import numpy as np
 import os
-import requests
 from datetime import datetime, timedelta
 
 # ─────────────────────────────────────────────────────────────────

@@ -17,9 +17,11 @@ load_dotenv()
 
 # ── Check whether MySQL is configured ────────────────────────────
 _MYSQL_HOST = os.getenv("MYSQL_HOST", "").strip()
-_MYSQL_ENABLED = bool(_MYSQL_HOST and _MYSQL_HOST != "localhost" or
-                      (os.getenv("MYSQL_USER", "").strip() and
-                       os.getenv("MYSQL_PASSWORD", "").strip()))
+_MYSQL_ENABLED = bool(
+    _MYSQL_HOST and
+    os.getenv("MYSQL_USER", "").strip() and
+    os.getenv("MYSQL_PASSWORD", "").strip()
+)
 
 
 class Database:

@@ -37,9 +37,9 @@ desktop.ini
 *.log
 logs/
 
-# ── Large model files (re-generate on deploy) ─────────────────────
-# Uncomment these if model files are too large for GitHub (>100 MB)
-# *.joblib
+# ── Generated model & data files (re-generate via setup.py) ─────────
+*.joblib
+tn_agri_dataset.csv
 
 # ── Database ─────────────────────────────────────────────────────
 *.sqlite3

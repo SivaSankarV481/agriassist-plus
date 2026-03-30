@@ -56,8 +56,14 @@ pip install -r requirements.txt
 python generate_dataset.py
 python train_models.py
 
-# Run
+# Run the Streamlit web app
 streamlit run app.py
+
+# Run the WhatsApp bot (requires WHATSAPP_TOKEN and PHONE_NUMBER_ID in .env)
+python whatsapp_bot.py
+
+# Test the WhatsApp bot in CLI mode (no WhatsApp needed)
+python whatsapp_bot.py --cli
 ```
 
 ---
@@ -66,18 +72,20 @@ streamlit run app.py
 
 ```
 agri assist 1/
-├── app.py                    ← Main Streamlit app (5 tabs)
+├── app.py                    ← Main Streamlit web app (5 tabs)
+├── whatsapp_bot.py           ← WhatsApp chatbot (Flask + Meta Cloud API)
 ├── weather.py                ← Open-Meteo weather integration
 ├── rag_engine.py             ← RAG + Claude AI recommendation engine
 ├── database.py               ← MySQL integration (optional)
 ├── generate_dataset.py       ← Generates TN crop dataset
 ├── train_models.py           ← Trains XGBoost models
+├── setup.py                  ← One-click setup script
+├── check_db.py               ← MySQL connection diagnostic tool
 ├── requirements.txt          ← Python dependencies
 ├── .streamlit/
-│   ├── config.toml           ← Streamlit theme config
-│   └── secrets.toml.example  ← Secrets template
-├── .env.example              ← Local env template
-├── .gitignore                ← Keeps .env and secrets out of GitHub
+│   └── config.toml           ← Streamlit theme config
+├── .env.example              ← Local env template (copy to .env)
+├── .gitignore                ← Keeps .env and generated files out of GitHub
 └── README.md
 ```
 
@@ -93,6 +101,17 @@ agri assist 1/
 | 🧪 Chemical Advisor | Weather-aware chemical recommendations with dosage |
 | 📈 Market Trends | Historical price trends, district comparison |
 
+### WhatsApp Bot Features
+
+| Feature | Description |
+|---------|-------------|
+| 🌐 Language Menu | Supports English, Tamil, Hindi, Telugu, Kannada, Malayalam |
+| 💰 Price Check | Crop price prediction via WhatsApp conversation |
+| 🌦️ Weather Alert | Live weather + crop stress alerts for any TN district |
+| 🤖 AI Adviser | Claude-powered diagnosis of crop problems |
+| 🧪 Chemical Advice | Weather-safe chemical recommendations with dosage |
+| 🔄 Auto-translate | All replies translated to farmer's chosen language |
+
 ---
 
 ## 🔑 APIs Used
@@ -100,5 +119,6 @@ agri assist 1/
 | API | Purpose | Cost |
 |-----|---------|------|
 | Open-Meteo | Live weather + forecast | **FREE** |
-| Anthropic Claude | AI crop advice | API key required |
-| MySQL (optional) | Save predictions & history | Optional |
+| Anthropic Claude | AI crop advice + WhatsApp replies | API key required |
+| Meta WhatsApp Cloud API | WhatsApp bot messaging | Free tier available |
+| MySQL (optional) | Save predictions & chat history | Optional |

@@ -10,11 +10,10 @@ Run:
 
 import streamlit as st
 import pandas as pd
-import numpy as np
 import joblib
 import os
 import plotly.graph_objects as go
-from datetime import date, datetime
+from datetime import date
 from dotenv import load_dotenv
 
 from weather import get_weather, weather_code_label
@@ -31,7 +30,7 @@ def init_database():
 
 db = init_database()
 
-load_dotenv()
+load_dotenv()  # ensure .env is loaded after cache_resource init
 
 # ─────────────────────────────────────────────
 # Page config

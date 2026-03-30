@@ -4,7 +4,7 @@ whatsapp_bot.py
 AgriAssist+ WhatsApp Chatbot — Meta Cloud API webhook server.
 
 Run (development):
-    pip install flask requests python-dotenv
+    pip install -r requirements.txt
     python whatsapp_bot.py
 
 Expose publicly for Meta webhook verification:
@@ -15,14 +15,28 @@ Expose publicly for Meta webhook verification:
 
 import os
 import re
-import json
 import joblib
 import hashlib
 import requests
 import pandas as pd
-from datetime import date, datetime
+from datetime import date
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
+
+# ── Translation ──────────────────────────────────────────────────
+try:
+    from deep_translator import GoogleTranslator
+    TRANSLATION_AVAILABLE = True
+except ImportError:
+    TRANSLATION_AVAILABLE = False
+    print("⚠️  deep-translator not installed. Run: pip install deep-translator")
+
+try:
+    from langdetect import detect as _langdetect
+    LANGDETECT_AVAILABLE = True
+except ImportError:
+    LANGDETECT_AVAILABLE = False
+    print("⚠️  langdetect not installed. Run: pip install langdetect")
 
 load_dotenv()
 
@@ -88,6 +102,81 @@ TN_DISTRICTS = [
 ]
 
 # ─────────────────────────────────────────────
+# Translation helpers
+# ─────────────────────────────────────────────
+SUPPORTED_LANGUAGES = {
+    "en": ("English",   "1"),
+    "ta": ("Tamil",     "2"),
+    "hi": ("Hindi",     "3"),
+    "te": ("Telugu",    "4"),
+    "kn": ("Kannada",   "5"),
+    "ml": ("Malayalam", "6"),
+}
+LANG_BY_NUMBER = {"1":"en", "2":"ta", "3":"hi", "4":"te", "5":"kn", "6":"ml"}
+
+def language_menu() -> str:
+    return (
+        "Select your language / Mozhi Thervuseiyungal:\n\n"
+        "1  English\n"
+        "2  Tamil (தமிழ்)\n"
+        "3  Hindi (हिंदी)\n"
+        "4  Telugu (తెలుగు)\n"
+        "5  Kannada (ಕನ್ನಡ)\n"
+        "6  Malayalam (മലയാളം)\n\n"
+        "Reply with a number (1-6)"
+    )
+
+def detect_language(text: str) -> str:
+    """Auto-detect language using langdetect."""
+    if not LANGDETECT_AVAILABLE or len(text.strip()) < 5:
+        return "en"
+    try:
+        lang = _langdetect(text)
+        return lang if lang in SUPPORTED_LANGUAGES else "en"
+    except Exception:
+        return "en"
+
+def translate_to_english(text: str, source_lang: str) -> str:
+    """Translate farmer's message to English for processing."""
+    if not TRANSLATION_AVAILABLE or source_lang == "en":
+        return text
+    try:
+        return GoogleTranslator(source=source_lang, target="en").translate(text)
+    except Exception as e:
+        print(f"⚠️  Translation error (→EN): {e}")
+        return text
+
+def translate_reply(text: str, target_lang: str) -> str:
+    """Translate bot reply back to farmer's language, preserving URLs."""
+    if not TRANSLATION_AVAILABLE or not target_lang or target_lang == "en":
+        return text
+    try:
+        url_pat = re.compile(r'https?://\S+')
+        lines = text.split("\n")
+        out = []
+        for line in lines:
+            stripped = line.strip()
+            if (not stripped
+                    or set(stripped).issubset(set("─━─ "))
+                    or url_pat.fullmatch(stripped)
+                    or len(stripped) <= 3):
+                out.append(line)
+                continue
+            urls = url_pat.findall(line)
+            safe = url_pat.sub("URLPH", line)
+            try:
+                t = GoogleTranslator(source="en", target=target_lang).translate(safe)
+                for url in urls:
+                    t = t.replace("URLPH", url, 1)
+                out.append(t if t else line)
+            except Exception:
+                out.append(line)
+        return "\n".join(out)
+    except Exception as e:
+        print(f"⚠️  Translation error (→{target_lang}): {e}")
+        return text
+
+# ─────────────────────────────────────────────
 # Session store  {phone: session_dict}
 # ─────────────────────────────────────────────
 SESSIONS = {}
@@ -95,15 +184,18 @@ SESSIONS = {}
 def get_session(phone: str) -> dict:
     if phone not in SESSIONS:
         SESSIONS[phone] = {
-            "state": "idle", "crop": None, "district": None,
+            "state": "choose_language", "crop": None, "district": None,
             "weather": None, "prices": {}, "yield_loss": 0.0,
+            "lang": None,  # None = not yet chosen
         }
     return SESSIONS[phone]
 
 def reset_session(phone: str):
+    lang = SESSIONS.get(phone, {}).get("lang", None)
     SESSIONS[phone] = {
-        "state": "idle", "crop": None, "district": None,
+        "state": "choose_language", "crop": None, "district": None,
         "weather": None, "prices": {}, "yield_loss": 0.0,
+        "lang": lang,  # keep language preference on reset
     }
 
 # ─────────────────────────────────────────────
@@ -200,20 +292,25 @@ def parse_intent(text: str, session: dict) -> str:
 
     if t in ("hi","hello","start","menu","help","/start"): return "greeting"
     if t in ("0","reset","restart","main menu"):            return "reset"
+    if t in ("lang","language","change language"):         return "change_language"
     if t == "web" or t == "webapp" or t == "website":      return "show_webapp"
+
+    if state == "choose_language":
+        if t in LANG_BY_NUMBER:                             return "set_language"
 
     if state == "main_menu":
         if t in ("1","price","price check"):   return "price_check"
         if t in ("2","weather"):               return "weather_alert"
         if t in ("3","disease","ai advice"):   return "ai_advice"
         if t in ("4","chemical","chemicals"):  return "chemical_advice"
-        if t in ("5","webapp","web app"):      return "show_webapp"
+        if t in ("5","web","webapp","website","full web app","app"): return "show_webapp"
+        
 
     if state == "post_prediction":
         if t in ("1","weather"):               return "weather_alert"
         if t in ("2","disease","ai advice"):   return "ai_advice"
         if t in ("3","chemical","chemicals"):  return "chemical_advice"
-        if t in ("4","web","webapp","website","full report"): return "show_webapp"
+        if t in ("4","web","webapp","website","full report","full web app","app"): return "show_webapp"
 
     if state == "ask_problem":              return "problem_description"
     if state == "ask_chemical_problem":    return "chemical_problem_description"
@@ -287,18 +384,18 @@ def web_app_message(crop=None, district=None, context=""):
 
 def welcome_message():
     return (
-        "🌾 *AgriAssist+* — Tamil Nadu Crop Intelligence\n\n"
-        "Hello Farmer! 👋 I can help you with:\n\n"
+        "🌾 AgriAssist+ — Tamil Nadu Crop Intelligence\n"
+        "Hello Farmer! 👋 I can help you with:\n"
         "1️⃣  Price prediction\n"
         "2️⃣  Weather alert\n"
         "3️⃣  Disease & AI advice\n"
         "4️⃣  Chemical recommendations\n"
         "5️⃣  Open full web app\n\n"
-        "Reply with a number *or* type your crop & district.\n"
-        "_Example: tomato coimbatore_\n\n"
-        f"🌐 *Full Web App (charts & more):*\n"
+        "Reply with a number or type your crop & district.\n"
+        "Example: tomato coimbatore\n\n"
+        f"🌐 Full Web App (charts & more):\n"
         f"{WEB_APP_URL}\n\n"
-        "Type *0* anytime to return to this menu."
+        "Type 0 anytime to return to this menu."
     )
 
 def ask_crop_message():
@@ -360,10 +457,9 @@ def price_result_message(crop, district, prices, yield_loss):
         "1️⃣ Weather alert",
         "2️⃣ Disease & AI advice",
         "3️⃣ Chemical tips",
-        f"4️⃣ Full web app (charts & trends)",
+        f"4️⃣ Full Web App (charts & more)",
+        f"   {WEB_APP_URL}",
         "0️⃣ Main menu",
-        "",
-        f"🌐 {WEB_APP_URL}",
     ])
 
 def weather_message(district, weather_data):
@@ -388,10 +484,11 @@ def weather_message(district, weather_data):
     ] + [f"  • {a}" for a in alerts] + [
         "",
         "─────────────────────",
-        "2️⃣ AI advice  |  3️⃣ Chemicals",
-        f"4️⃣ Full web app  |  0️⃣ Menu",
-        "",
-        f"🌐 {WEB_APP_URL}",
+        "2️⃣ AI advice",
+        "3️⃣ Chemicals",
+        f"4️⃣ Full Web App (charts & more)",
+        f"   {WEB_APP_URL}",
+        "0️⃣ Main menu",
     ])
 
 def ask_problem_message(crop, district):
@@ -440,9 +537,9 @@ def ai_advice_message(crop, district, problem, weather, prices, yield_loss, phon
             recs[:650], "",
             "─────────────────────",
             "3️⃣ Chemical tips",
-            f"4️⃣ Full web app (detailed analysis)",
-            "0️⃣ Main menu", "",
-            f"🌐 {WEB_APP_URL}",
+            f"4️⃣ Full Web App (charts & more)",
+            f"   {WEB_APP_URL}",
+            "0️⃣ Main menu",
         ])[:4090]
     except Exception as e:
         return f"⚠️ AI advisor error: {e}\n\n0️⃣ Main menu"
@@ -467,9 +564,9 @@ def chemical_problem_message(crop, district, problem, weather, yield_loss, phone
             advice[:3600], "",
             "─────────────────────",
             "2️⃣ AI advice",
-            f"4️⃣ Full web app (dosage cards & charts)",
-            "0️⃣ Main menu", "",
-            f"🌐 {WEB_APP_URL}",
+            f"4️⃣ Full Web App (charts & more)",
+            f"   {WEB_APP_URL}",
+            "0️⃣ Main menu",
         ])[:4090]
     except Exception as e:
         return f"⚠️ Chemical advisor error: {e}\n\n0️⃣ Main menu"
@@ -481,7 +578,7 @@ def unknown_message():
         "• Crop + district (e.g. *Tomato Coimbatore*)\n"
         "• *1* Price  *2* Weather\n"
         "• *3* AI advice  *4* Chemicals\n"
-        f"• *5* Open web app\n"
+        
         "• *0* Main menu"
     )
 
@@ -531,19 +628,57 @@ def run_prediction(crop, district, session):
 def handle_message(phone: str, text: str) -> str:
     session = get_session(phone)
     session["phone"] = phone
-    intent = parse_intent(text, session)
+
+    # ── Step 1: Language selection gate (first contact) ──────────
+    # If lang not yet chosen, show menu — UNLESS farmer is picking a language right now
+    t_stripped = text.strip()
+    if session.get("lang") is None:
+        if t_stripped in LANG_BY_NUMBER:
+            # Farmer chose a language
+            chosen = LANG_BY_NUMBER[t_stripped]
+            session["lang"] = chosen
+            session["state"] = "main_menu"
+            return translate_reply(welcome_message(), chosen)
+        elif t_stripped in ("lang", "language", "change language"):
+            return language_menu()
+        else:
+            # Any other message → show language menu
+            session["state"] = "choose_language"
+            return language_menu()
+
+    # ── Step 2: Change language intent (anytime) ─────────────────
+    if t_stripped.lower() in ("lang", "language", "change language"):
+        session["lang"] = None
+        session["state"] = "choose_language"
+        return language_menu()
+
+    # ── Step 3: Detect & translate incoming message ───────────────
+    lang = session["lang"]  # already set at this point
+    detected_lang = detect_language(text)
+    if detected_lang != "en" and detected_lang != lang:
+        print(f"🌐 Detected language: {SUPPORTED_LANGUAGES.get(detected_lang, detected_lang)}")
+        text_for_processing = translate_to_english(text, detected_lang)
+        print(f"   Translated: {text!r} → {text_for_processing!r}")
+    elif lang != "en":
+        text_for_processing = translate_to_english(text, lang)
+    else:
+        text_for_processing = text
+
+    intent = parse_intent(text_for_processing, session)
 
     if intent == "greeting":
         session["state"] = "main_menu"
-        return welcome_message()
+        return translate_reply(welcome_message(), lang)
 
     if intent == "reset":
         reset_session(phone)
         SESSIONS[phone]["state"] = "main_menu"
-        return welcome_message()
+        SESSIONS[phone]["lang"] = lang  # keep language preference after reset
+        return translate_reply(welcome_message(), lang)
 
     if intent == "show_webapp":
-        return web_app_message(session.get("crop"), session.get("district"))
+        return translate_reply(web_app_message(session.get("crop"), session.get("district")), lang)
+
 
     if intent == "inline_query":
         crop = session.pop("_inline_crop", None) or session.get("crop")
@@ -552,87 +687,87 @@ def handle_message(phone: str, text: str) -> str:
             session["crop"] = crop; session["district"] = dist
             weather, prices, yl = run_prediction(crop, dist, session)
             session["state"] = "post_prediction"
-            return price_result_message(crop, dist, prices, yl)
+            return translate_reply(price_result_message(crop, dist, prices, yl), lang)
         if crop and not dist:
             session["crop"] = crop; session["state"] = "choose_district"
-            return ask_district_message(crop)
+            return translate_reply(ask_district_message(crop), lang)
         if dist and not crop:
             session["district"] = dist; session["state"] = "choose_crop"
-            return ask_crop_message()
+            return translate_reply(ask_crop_message(), lang)
 
     if intent == "price_check":
         if session.get("crop") and session.get("district"):
             weather, prices, yl = run_prediction(session["crop"], session["district"], session)
             session["state"] = "post_prediction"
-            return price_result_message(session["crop"], session["district"], prices, yl)
+            return translate_reply(price_result_message(session["crop"], session["district"], prices, yl), lang)
         session["state"] = "choose_crop"
-        return ask_crop_message()
+        return translate_reply(ask_crop_message(), lang)
 
     if intent == "weather_alert":
         if session.get("district"):
             wd = session.get("weather") or get_weather(session["district"])
             session["weather"] = wd; session["state"] = "post_prediction"
-            return weather_message(session["district"], wd)
+            return translate_reply(weather_message(session["district"], wd), lang)
         session["state"] = "choose_district"
-        return "📍 *Which district?*\nType your district name (e.g. *Coimbatore*)"
+        return translate_reply("📍 *Which district?*\nType your district name (e.g. *Coimbatore*)", lang)
 
     if intent == "ai_advice":
         if session.get("crop") and session.get("district"):
             session["state"] = "ask_problem"
-            return ask_problem_message(session["crop"], session["district"])
+            return translate_reply(ask_problem_message(session["crop"], session["district"]), lang)
         session["state"] = "choose_crop"
-        return ask_crop_message()
+        return translate_reply(ask_crop_message(), lang)
 
     if intent == "chemical_advice":
         if session.get("crop") and session.get("district"):
             session["state"] = "ask_chemical_problem"
-            return ask_chemical_problem_message(session["crop"], session["district"])
+            return translate_reply(ask_chemical_problem_message(session["crop"], session["district"]), lang)
         session["state"] = "choose_crop"
-        return ask_crop_message()
+        return translate_reply(ask_crop_message(), lang)
 
     if session["state"] == "choose_crop":
-        t = text.strip().lower(); build_crop_keywords()
+        t = text_for_processing.strip().lower(); build_crop_keywords()
         for w in t.split():
             if w in CROP_KEYWORDS:
                 session["crop"] = CROP_KEYWORDS[w]; session["state"] = "choose_district"
-                return ask_district_message(session["crop"])
-        return f"🌱 I didn't recognise that crop.\n\n{ask_crop_message()}"
+                return translate_reply(ask_district_message(session["crop"]), lang)
+        return translate_reply(f"🌱 I didn't recognise that crop.\n\n{ask_crop_message()}", lang)
 
     if session["state"] == "choose_district":
-        t = text.strip().lower()
+        t = text_for_processing.strip().lower()
         for d in TN_DISTRICTS:
             if t in d.lower() or d.lower().startswith(t):
                 session["district"] = d
                 weather, prices, yl = run_prediction(session["crop"], d, session)
                 session["state"] = "post_prediction"
-                return price_result_message(session["crop"], d, prices, yl)
-        return f"📍 I didn't recognise that district.\n\n{ask_district_message(session.get('crop','your crop'))}"
+                return translate_reply(price_result_message(session["crop"], d, prices, yl), lang)
+        return translate_reply(f"📍 I didn't recognise that district.\n\n{ask_district_message(session.get('crop','your crop'))}", lang)
 
     if session["state"] == "ask_problem":
-        if len(text.strip()) < 5:
-            return "⚠️ Please describe the problem in more detail.\n\n_Example: Leaves turning yellow, white powder on stems_"
+        if len(text_for_processing.strip()) < 5:
+            return translate_reply("⚠️ Please describe the problem in more detail.\n\n_Example: Leaves turning yellow, white powder on stems_", lang)
         session["state"] = "post_prediction"
-        return ai_advice_message(
-            session["crop"], session["district"], text.strip(),
+        return translate_reply(ai_advice_message(
+            session["crop"], session["district"], text_for_processing.strip(),
             session.get("weather") or {}, session.get("prices", {}),
             session.get("yield_loss", 0), phone=phone,
-        )
+        ), lang)
 
     if session["state"] == "ask_chemical_problem":
-        if len(text.strip()) < 5:
-            return "⚠️ Please describe the problem in more detail.\n\n_Example: White powder on leaves, insects eating stems_"
+        if len(text_for_processing.strip()) < 5:
+            return translate_reply("⚠️ Please describe the problem in more detail.\n\n_Example: White powder on leaves, insects eating stems_", lang)
         if not session.get("weather"):
             session["weather"] = get_weather(session["district"])
         session["state"] = "post_prediction"
-        return chemical_problem_message(
-            session["crop"], session["district"], text.strip(),
+        return translate_reply(chemical_problem_message(
+            session["crop"], session["district"], text_for_processing.strip(),
             session.get("weather") or {}, session.get("yield_loss", 0), phone=phone,
-        )
+        ), lang)
 
     if session["state"] in ("idle", "main_menu", "post_prediction"):
-        return unknown_message()
+        return translate_reply(unknown_message(), lang)
 
-    return unknown_message()
+    return translate_reply(unknown_message(), lang)
 
 # ─────────────────────────────────────────────
 # WhatsApp API — send message
@@ -642,7 +777,7 @@ def send_whatsapp_message(to: str, body: str):
         print(f"[MOCK] To {to}:\n{body}\n"); return
     payload = {
         "messaging_product": "whatsapp", "recipient_type": "individual",
-        "to": to, "type": "text", "text": {"preview_url": True, "body": body},
+        "to": to, "type": "text", "text": {"preview_url": False, "body": body},
     }
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
     try:
