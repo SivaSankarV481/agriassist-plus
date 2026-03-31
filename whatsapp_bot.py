@@ -16,7 +16,6 @@ Expose publicly for Meta webhook verification:
 import os
 import re
 import joblib
-import hashlib
 import requests
 import pandas as pd
 from datetime import date
@@ -48,10 +47,9 @@ WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "agriassist_verify")
 PHONE_NUMBER_ID       = os.getenv("PHONE_NUMBER_ID", "")
 WHATSAPP_API_URL      = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
 
-# ── Web App URL — your Streamlit Cloud deployment ────────────────
 WEB_APP_URL = os.getenv(
     "WEB_APP_URL",
-    "https://siddharth02122004-agri-assist-app.streamlit.app"   # ← update after deploy
+    "https://siddharth02122004-agri-assist-app.streamlit.app"
 )
 
 app = Flask(__name__)
@@ -81,6 +79,7 @@ except Exception as e:
     print(f"⚠️ Model loading error: {e}")
 
 from weather import get_weather
+from database import get_db
 
 # ─────────────────────────────────────────────
 # Constants
@@ -127,7 +126,6 @@ def language_menu() -> str:
     )
 
 def detect_language(text: str) -> str:
-    """Auto-detect language using langdetect."""
     if not LANGDETECT_AVAILABLE or len(text.strip()) < 5:
         return "en"
     try:
@@ -137,7 +135,6 @@ def detect_language(text: str) -> str:
         return "en"
 
 def translate_to_english(text: str, source_lang: str) -> str:
-    """Translate farmer's message to English for processing."""
     if not TRANSLATION_AVAILABLE or source_lang == "en":
         return text
     try:
@@ -147,7 +144,6 @@ def translate_to_english(text: str, source_lang: str) -> str:
         return text
 
 def translate_reply(text: str, target_lang: str) -> str:
-    """Translate bot reply back to farmer's language, preserving URLs."""
     if not TRANSLATION_AVAILABLE or not target_lang or target_lang == "en":
         return text
     try:
@@ -160,8 +156,7 @@ def translate_reply(text: str, target_lang: str) -> str:
                     or set(stripped).issubset(set("─━─ "))
                     or url_pat.fullmatch(stripped)
                     or len(stripped) <= 3):
-                out.append(line)
-                continue
+                out.append(line); continue
             urls = url_pat.findall(line)
             safe = url_pat.sub("URLPH", line)
             try:
@@ -182,20 +177,42 @@ def translate_reply(text: str, target_lang: str) -> str:
 SESSIONS = {}
 
 def get_session(phone: str) -> dict:
+    """
+    Returns the in-memory session for a phone number.
+    The session_id stored inside is a secure UUID (from the DB or derived
+    from a SHA-256 hash of the phone) — never the phone number itself.
+    This is the fix for plothole #7.
+    """
     if phone not in SESSIONS:
+        db = get_db()
+        session_id = db.get_or_create_session_id(phone)
         SESSIONS[phone] = {
-            "state": "choose_language", "crop": None, "district": None,
-            "weather": None, "prices": {}, "yield_loss": 0.0,
-            "lang": None,  # None = not yet chosen
+            "state":      "choose_language",
+            "session_id": session_id,   # UUID — safe to store in DB
+            "crop":       None,
+            "district":   None,
+            "weather":    None,
+            "prices":     {},
+            "yield_loss": 0.0,
+            "lang":       None,
         }
     return SESSIONS[phone]
 
 def reset_session(phone: str):
-    lang = SESSIONS.get(phone, {}).get("lang", None)
+    existing = SESSIONS.get(phone, {})
+    lang       = existing.get("lang", None)
+    session_id = existing.get("session_id")      # keep the same UUID on reset
+    if session_id is None:
+        session_id = get_db().get_or_create_session_id(phone)
     SESSIONS[phone] = {
-        "state": "choose_language", "crop": None, "district": None,
-        "weather": None, "prices": {}, "yield_loss": 0.0,
-        "lang": lang,  # keep language preference on reset
+        "state":      "choose_language",
+        "session_id": session_id,
+        "crop":       None,
+        "district":   None,
+        "weather":    None,
+        "prices":     {},
+        "yield_loss": 0.0,
+        "lang":       lang,
     }
 
 # ─────────────────────────────────────────────
@@ -292,28 +309,27 @@ def parse_intent(text: str, session: dict) -> str:
 
     if t in ("hi","hello","start","menu","help","/start"): return "greeting"
     if t in ("0","reset","restart","main menu"):            return "reset"
-    if t in ("lang","language","change language"):         return "change_language"
-    if t == "web" or t == "webapp" or t == "website":      return "show_webapp"
+    if t in ("lang","language","change language"):          return "change_language"
+    if t in ("web","webapp","website"):                     return "show_webapp"
 
     if state == "choose_language":
-        if t in LANG_BY_NUMBER:                             return "set_language"
+        if t in LANG_BY_NUMBER: return "set_language"
 
     if state == "main_menu":
-        if t in ("1","price","price check"):   return "price_check"
-        if t in ("2","weather"):               return "weather_alert"
-        if t in ("3","disease","ai advice"):   return "ai_advice"
-        if t in ("4","chemical","chemicals"):  return "chemical_advice"
+        if t in ("1","price","price check"):                return "price_check"
+        if t in ("2","weather"):                            return "weather_alert"
+        if t in ("3","disease","ai advice"):                return "ai_advice"
+        if t in ("4","chemical","chemicals"):               return "chemical_advice"
         if t in ("5","web","webapp","website","full web app","app"): return "show_webapp"
-        
 
     if state == "post_prediction":
-        if t in ("1","weather"):               return "weather_alert"
-        if t in ("2","disease","ai advice"):   return "ai_advice"
-        if t in ("3","chemical","chemicals"):  return "chemical_advice"
+        if t in ("1","weather"):                            return "weather_alert"
+        if t in ("2","disease","ai advice"):                return "ai_advice"
+        if t in ("3","chemical","chemicals"):               return "chemical_advice"
         if t in ("4","web","webapp","website","full report","full web app","app"): return "show_webapp"
 
-    if state == "ask_problem":              return "problem_description"
-    if state == "ask_chemical_problem":    return "chemical_problem_description"
+    if state == "ask_problem":           return "problem_description"
+    if state == "ask_chemical_problem":  return "chemical_problem_description"
 
     words = t.split()
     if state == "choose_crop":
@@ -347,12 +363,7 @@ def get_all_crops():
         ALL_CROPS_LIST = sorted(DF["Commodity"].dropna().unique().tolist())
     return ALL_CROPS_LIST
 
-def web_app_message(crop=None, district=None, context=""):
-    """
-    Sends a rich link to the Streamlit web app.
-    If crop/district are known, includes a note that the full analysis
-    is ready there.
-    """
+def web_app_message(crop=None, district=None):
     if crop and district:
         detail = (
             f"Your *{crop}* analysis for *{district}* is available in full detail on the web app:\n\n"
@@ -371,7 +382,6 @@ def web_app_message(crop=None, district=None, context=""):
             "✅ Chemical advisor with dosage\n"
             "✅ Market trend graphs\n"
         )
-
     return (
         f"🌐 *AgriAssist+ Web App*\n"
         f"──────────────────────\n\n"
@@ -512,11 +522,12 @@ def ask_chemical_problem_message(crop, district):
         "Type your problem ↓"
     )
 
-def ai_advice_message(crop, district, problem, weather, prices, yield_loss, phone="anon"):
+def ai_advice_message(crop, district, problem, weather, prices, yield_loss, session_id="anon"):
     if RAG is None:
         return "⚠️ AI advisor not available right now.\n\n0️⃣ Main menu"
     ctx = {
         "crop": crop, "district": district,
+        "session_id": session_id,
         "weather": weather.get("avg_7day", {}) if weather else {},
         "prices": prices, "yield_loss_pct": yield_loss,
     }
@@ -544,7 +555,7 @@ def ai_advice_message(crop, district, problem, weather, prices, yield_loss, phon
     except Exception as e:
         return f"⚠️ AI advisor error: {e}\n\n0️⃣ Main menu"
 
-def chemical_problem_message(crop, district, problem, weather, yield_loss, phone="anon"):
+def chemical_problem_message(crop, district, problem, weather, yield_loss, session_id="anon"):
     if RAG is None:
         return "⚠️ Chemical advisor not available right now.\n\n0️⃣ Main menu"
     weather_avg = weather.get("avg_7day", {}) if weather else {}
@@ -578,7 +589,6 @@ def unknown_message():
         "• Crop + district (e.g. *Tomato Coimbatore*)\n"
         "• *1* Price  *2* Weather\n"
         "• *3* AI advice  *4* Chemicals\n"
-        
         "• *0* Main menu"
     )
 
@@ -601,22 +611,24 @@ def run_prediction(crop, district, session):
             yield_loss = float(MODELS["yield_loss"].predict(X_yield)[0]) if "yield_loss" in MODELS else 0.0
         except Exception as e:
             print(f"Prediction error: {e}")
-    session["prices"] = prices
+    session["prices"]     = prices
     session["yield_loss"] = yield_loss
+
+    # Save to DB using the secure UUID session_id (not the phone number)
+    session_id = session.get("session_id", "unknown")
     try:
-        from database import get_db
         db = get_db()
         if db.is_connected:
-            sid = hashlib.md5(f"wa_{session.get('phone','anon')}".encode()).hexdigest()[:16]
-            db.upsert_session(sid, crop, district)
-            db.save_prediction(sid, {
+            db.upsert_session(session_id, crop, district)
+            db.save_prediction(session_id, {
                 "crop": crop, "variety": "Local", "district": district,
                 "market": f"{district} APMC", "prediction_date": str(date.today()),
-                "current_price": round(prices.get("current", 0), 2),
-                "price_1week":   round(prices.get("1week", 0), 2),
-                "price_2week":   None,
-                "price_1month":  round(prices.get("1month", 0), 2),
-                "yield_loss_pct": round(yield_loss, 2), "yield_qty_qtl": 10,
+                "current_price":  round(prices.get("current", 0), 2),
+                "price_1week":    round(prices.get("1week", 0), 2),
+                "price_2week":    None,
+                "price_1month":   round(prices.get("1month", 0), 2),
+                "yield_loss_pct": round(yield_loss, 2),
+                "yield_qty_qtl":  10,
             })
     except Exception:
         pass
@@ -627,22 +639,19 @@ def run_prediction(crop, district, session):
 # ─────────────────────────────────────────────
 def handle_message(phone: str, text: str) -> str:
     session = get_session(phone)
-    session["phone"] = phone
 
-    # ── Step 1: Language selection gate (first contact) ──────────
-    # If lang not yet chosen, show menu — UNLESS farmer is picking a language right now
     t_stripped = text.strip()
+
+    # ── Step 1: Language selection gate ──────────────────────────
     if session.get("lang") is None:
         if t_stripped in LANG_BY_NUMBER:
-            # Farmer chose a language
             chosen = LANG_BY_NUMBER[t_stripped]
             session["lang"] = chosen
             session["state"] = "main_menu"
             return translate_reply(welcome_message(), chosen)
-        elif t_stripped in ("lang", "language", "change language"):
+        elif t_stripped.lower() in ("lang", "language", "change language"):
             return language_menu()
         else:
-            # Any other message → show language menu
             session["state"] = "choose_language"
             return language_menu()
 
@@ -652,19 +661,18 @@ def handle_message(phone: str, text: str) -> str:
         session["state"] = "choose_language"
         return language_menu()
 
-    # ── Step 3: Detect & translate incoming message ───────────────
-    lang = session["lang"]  # already set at this point
+    # ── Step 3: Translate incoming message ────────────────────────
+    lang = session["lang"]
     detected_lang = detect_language(text)
     if detected_lang != "en" and detected_lang != lang:
-        print(f"🌐 Detected language: {SUPPORTED_LANGUAGES.get(detected_lang, detected_lang)}")
         text_for_processing = translate_to_english(text, detected_lang)
-        print(f"   Translated: {text!r} → {text_for_processing!r}")
     elif lang != "en":
         text_for_processing = translate_to_english(text, lang)
     else:
         text_for_processing = text
 
     intent = parse_intent(text_for_processing, session)
+    session_id = session["session_id"]
 
     if intent == "greeting":
         session["state"] = "main_menu"
@@ -673,12 +681,11 @@ def handle_message(phone: str, text: str) -> str:
     if intent == "reset":
         reset_session(phone)
         SESSIONS[phone]["state"] = "main_menu"
-        SESSIONS[phone]["lang"] = lang  # keep language preference after reset
+        SESSIONS[phone]["lang"]  = lang
         return translate_reply(welcome_message(), lang)
 
     if intent == "show_webapp":
         return translate_reply(web_app_message(session.get("crop"), session.get("district")), lang)
-
 
     if intent == "inline_query":
         crop = session.pop("_inline_crop", None) or session.get("crop")
@@ -750,7 +757,7 @@ def handle_message(phone: str, text: str) -> str:
         return translate_reply(ai_advice_message(
             session["crop"], session["district"], text_for_processing.strip(),
             session.get("weather") or {}, session.get("prices", {}),
-            session.get("yield_loss", 0), phone=phone,
+            session.get("yield_loss", 0), session_id=session_id,
         ), lang)
 
     if session["state"] == "ask_chemical_problem":
@@ -761,7 +768,8 @@ def handle_message(phone: str, text: str) -> str:
         session["state"] = "post_prediction"
         return translate_reply(chemical_problem_message(
             session["crop"], session["district"], text_for_processing.strip(),
-            session.get("weather") or {}, session.get("yield_loss", 0), phone=phone,
+            session.get("weather") or {}, session.get("yield_loss", 0),
+            session_id=session_id,
         ), lang)
 
     if session["state"] in ("idle", "main_menu", "post_prediction"):
@@ -796,8 +804,8 @@ def send_whatsapp_message(to: str, body: str):
 # ─────────────────────────────────────────────
 @app.route("/webhook", methods=["GET"])
 def verify_webhook():
-    mode = request.args.get("hub.mode")
-    token = request.args.get("hub.verify_token")
+    mode      = request.args.get("hub.mode")
+    token     = request.args.get("hub.verify_token")
     challenge = request.args.get("hub.challenge")
     if mode == "subscribe" and token == WHATSAPP_VERIFY_TOKEN:
         print("✅ Webhook verified."); return challenge, 200
@@ -814,12 +822,13 @@ def receive_message():
     try:
         value = data["entry"][0]["changes"][0]["value"]
         if "messages" not in value: return jsonify({"status": "ignored"}), 200
-        msg = value["messages"][0]
-        phone = msg["from"]; msg_type = msg.get("type", "")
+        msg      = value["messages"][0]
+        phone    = msg["from"]
+        msg_type = msg.get("type", "")
         if msg_type == "text":
             text = msg["text"]["body"]
         elif msg_type == "interactive":
-            it = msg["interactive"]
+            it   = msg["interactive"]
             text = it.get("button_reply", it.get("list_reply", {})).get("id", "")
         else:
             send_whatsapp_message(phone, "Sorry, I only understand text messages right now.")
@@ -841,7 +850,7 @@ def cli_test():
     print(f"Web App URL: {WEB_APP_URL}")
     print("Type 'quit' to exit.\n")
     build_crop_keywords()
-    phone = "test_farmer_1234"
+    phone = "test_farmer_cli_0001"
     while True:
         try:
             text = input("You: ").strip()

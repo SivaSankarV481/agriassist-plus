@@ -8,6 +8,7 @@ so the app works on Streamlit Cloud without a database.
 
 import os
 import json
+import uuid
 import hashlib
 from datetime import datetime, timedelta
 from typing import Optional
@@ -65,6 +66,16 @@ class Database:
         if not self.is_connected:
             return
         ddl_statements = [
+            # ── phone → session UUID mapping (fix for plothole #7) ──
+            """CREATE TABLE IF NOT EXISTS phone_sessions (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                phone_hash VARCHAR(64) NOT NULL UNIQUE,
+                session_id VARCHAR(36) NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                last_active DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                INDEX idx_phone_hash (phone_hash),
+                INDEX idx_session_id (session_id)
+            )""",
             """CREATE TABLE IF NOT EXISTS user_sessions (
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 session_id VARCHAR(64) NOT NULL UNIQUE,
@@ -120,6 +131,39 @@ class Database:
             print("✅ All tables initialised.")
         except Exception as e:
             print(f"⚠️  Table init failed: {e}")
+
+    # ── Secure session ID resolution (fix for plothole #7) ───────
+    def get_or_create_session_id(self, phone: str) -> str:
+        """
+        Returns a stable UUID session_id for the given phone number.
+        The phone number is stored only as a SHA-256 hash — never in plaintext.
+        Each unique phone gets exactly one UUID, no collisions possible.
+        Falls back to a deterministic UUID derived from the phone hash
+        when the DB is unavailable, so the WhatsApp bot still works offline.
+        """
+        phone_hash = hashlib.sha256(phone.encode()).hexdigest()
+
+        if self.is_connected:
+            # Try to look up existing session
+            rows = self._fetchall(
+                "SELECT session_id FROM phone_sessions WHERE phone_hash = %s LIMIT 1",
+                (phone_hash,)
+            )
+            if rows:
+                return rows[0]["session_id"]
+
+            # Create a new UUID session for this phone
+            new_sid = str(uuid.uuid4())
+            self._execute(
+                "INSERT INTO phone_sessions (phone_hash, session_id) VALUES (%s, %s)",
+                (phone_hash, new_sid)
+            )
+            return new_sid
+
+        # DB unavailable — derive a stable UUID from the phone hash so
+        # the same phone always gets the same session_id even without a DB.
+        # This is still unique per-phone (SHA-256 → UUID v5 namespace).
+        return str(uuid.uuid5(uuid.NAMESPACE_DNS, phone_hash))
 
     def upsert_session(self, session_id: str, crop: str = "", district: str = ""):
         if not self.is_connected: return

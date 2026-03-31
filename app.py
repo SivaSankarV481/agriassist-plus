@@ -131,6 +131,7 @@ st.markdown("""
     line-height: 1.7;
 }
 .yield-box b { color: #ffffff !important; }
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -465,7 +466,6 @@ with tab1:
         est_val  = round(est_loss * cur, 2)
         cur_kg   = qtl_to_kg(cur)
 
-        # ── Sell or Wait logic ──────────────────────────────────
         price_trend_1m = ((p1m - cur) / cur * 100) if p1m and cur else 0
         price_trend_1w = ((p1w - cur) / cur * 100) if p1w and cur else 0
 
@@ -606,7 +606,6 @@ with tab3:
             "yield_loss_pct": st.session_state.get("yield_loss", 0),
         }
 
-    # ── Problem input ───────────────────────────────────────────
     st.markdown('<div class="section-header">🔍 Describe Your Problem</div>', unsafe_allow_html=True)
     st.caption("Type your crop issue and click **Analyze** — you'll get a solution, recommendations, and all 6 topic answers in one go.")
 
@@ -624,20 +623,17 @@ with tab3:
         use_container_width=True,
     )
 
-    # ── Single click: diagnosis + all 6 topic answers ───────────
     if diagnose_btn:
         if not problem_input.strip():
             st.warning("⚠️ Please describe your crop problem first.")
         else:
             ctx = build_context()
 
-            # ── Diagnosis (solution + recommendations) ──
             with st.spinner("🤖 Diagnosing your problem..."):
                 diag = rag.diagnose_problem(problem_input.strip(), ctx)
             st.session_state["diagnosis_result"]  = diag
             st.session_state["diagnosis_problem"] = problem_input.strip()
 
-            # ── All 6 topic answers ──
             TOPICS = [
                 ("sell_wait",    "Should I sell now or wait?"),
                 ("diseases",     "What diseases should I watch for and how to treat them?"),
@@ -655,7 +651,6 @@ with tab3:
                 bar.progress((i + 1) / len(TOPICS), text=f"Topic {i+1}/6 — {base_q[:45]}…")
             bar.empty()
 
-    # ── Solution + Recommendations panels ──────────────────────
     if st.session_state.get("diagnosis_result"):
         diag    = st.session_state["diagnosis_result"]
         problem = st.session_state.get("diagnosis_problem", "")
@@ -676,7 +671,6 @@ with tab3:
             st.markdown("#### 📋 Recommendations")
             st.markdown(f'<div class="reco-panel">{diag["recommendations"]}</div>', unsafe_allow_html=True)
 
-    # ── 6 topic dropdowns ──────────────────────────────────────
     st.markdown("---")
     st.markdown('<div class="section-header">📚 Deep-Dive Topic Analysis</div>', unsafe_allow_html=True)
 
@@ -762,7 +756,6 @@ with tab4:
         avg      = wd_chem.get("avg_7day", {})
         chem_res = recommend_chemicals(chem_crop_sel, avg, chem_yl)
 
-        # ── AI Chemical Advice ──────────────────────────────────
         if ai_chem_btn:
             if not chem_disease_input.strip():
                 st.warning("⚠️ Please describe your crop disease or problem above before getting AI advice.")
@@ -925,3 +918,6 @@ with tab5:
 
     else:
         st.info(f"No data found for {t_crop} in {t_dist}.")
+
+
+
