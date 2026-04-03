@@ -43,6 +43,12 @@ logs/
 # *.joblib
 # tn_agri_dataset.csv
 
+# ── Untracked local files (show green in VS Code) ────────────────────
+future_1m_model.joblib
+future_1w_model.joblib
+future_2w_model.joblib
+whatsapp_bot.py
+
 # ── Database ─────────────────────────────────────────────────────
 *.sqlite3
 *.db
