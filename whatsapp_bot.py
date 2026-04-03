@@ -49,7 +49,7 @@ WHATSAPP_API_URL      = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/mes
 
 WEB_APP_URL = os.getenv(
     "WEB_APP_URL",
-    "https://siddharth02122004-agri-assist-app.streamlit.app"
+    "https://your-app.streamlit.app"
 )
 
 app = Flask(__name__)

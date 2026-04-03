@@ -37,9 +37,11 @@ desktop.ini
 *.log
 logs/
 
-# ── Generated model & data files (re-generate via setup.py) ─────────
-*.joblib
-tn_agri_dataset.csv
+# ── Generated model & data files ────────────────────────────────────
+# NOTE: joblib models and dataset ARE included so Streamlit Cloud can run
+# without needing to re-train. Uncomment below only for local dev.
+# *.joblib
+# tn_agri_dataset.csv
 
 # ── Database ─────────────────────────────────────────────────────
 *.sqlite3
