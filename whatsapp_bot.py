@@ -40,6 +40,10 @@ except ImportError:
 load_dotenv()
 
 # ─────────────────────────────────────────────
+# Base directory (so model files load correctly from any working dir)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# ─────────────────────────────────────────────
 # Config
 # ─────────────────────────────────────────────
 WHATSAPP_TOKEN        = os.getenv("WHATSAPP_TOKEN", "")
@@ -68,10 +72,13 @@ try:
         "1month":     "future_1m_model.joblib",
         "yield_loss": "yield_loss_model.joblib",
     }.items():
-        if os.path.exists(fname):
-            MODELS[key] = joblib.load(fname)
-    META = joblib.load("model_meta.joblib") if os.path.exists("model_meta.joblib") else None
-    DF   = pd.read_csv("tn_agri_dataset.csv") if os.path.exists("tn_agri_dataset.csv") else None
+        fpath = os.path.join(BASE_DIR, fname)
+        if os.path.exists(fpath):
+            MODELS[key] = joblib.load(fpath)
+    meta_path = os.path.join(BASE_DIR, "model_meta.joblib")
+    data_path = os.path.join(BASE_DIR, "tn_agri_dataset.csv")
+    META = joblib.load(meta_path) if os.path.exists(meta_path) else None
+    DF   = pd.read_csv(data_path) if os.path.exists(data_path) else None
     from rag_engine import RAGEngine
     RAG = RAGEngine()
     print("✅ Models, dataset and RAGEngine loaded.")
@@ -426,7 +433,8 @@ def ask_district_message(crop):
 
 def price_result_message(crop, district, prices, yield_loss):
     cur = prices.get("current", 0)
-    p1w = prices.get("1week", 0)
+    p1w = prices.get("1week",  0)
+    p2w = prices.get("2week",  0)
     p1m = prices.get("1month", 0)
     yl_icon = "🔴" if yield_loss > 25 else "🟠" if yield_loss > 10 else "🟢"
 
@@ -455,6 +463,7 @@ def price_result_message(crop, district, prices, yield_loss):
         "",
         f"💰 Current:  *Rs.{qtl_to_kg(cur):.2f}/kg*",
         f"📅 1 Week:   *Rs.{qtl_to_kg(p1w):.2f}/kg* {trend_icon(cur, p1w)}",
+        f"📅 2 Weeks:  *Rs.{qtl_to_kg(p2w):.2f}/kg* {trend_icon(cur, p2w)}",
         f"📅 1 Month:  *Rs.{qtl_to_kg(p1m):.2f}/kg* {trend_icon(cur, p1m)}",
         "",
         f"{yl_icon} Yield risk: *{yield_loss:.1f}%*",
@@ -605,8 +614,9 @@ def run_prediction(crop, district, session):
             X_yield = build_yield_row(crop, district, weather_data)
             prices = {
                 "current": float(MODELS["current"].predict(X_price)[0]),
-                "1week":   float(MODELS["1week"].predict(X_price)[0]),
-                "1month":  float(MODELS["1month"].predict(X_price)[0]) if "1month" in MODELS else 0,
+                "1week":   float(MODELS["1week"].predict(X_price)[0])   if "1week"  in MODELS else 0,
+                "2week":   float(MODELS["2week"].predict(X_price)[0])   if "2week"  in MODELS else 0,
+                "1month":  float(MODELS["1month"].predict(X_price)[0])  if "1month" in MODELS else 0,
             }
             yield_loss = float(MODELS["yield_loss"].predict(X_yield)[0]) if "yield_loss" in MODELS else 0.0
         except Exception as e:
@@ -683,6 +693,13 @@ def handle_message(phone: str, text: str) -> str:
         SESSIONS[phone]["state"] = "main_menu"
         SESSIONS[phone]["lang"]  = lang
         return translate_reply(welcome_message(), lang)
+
+    if intent == "set_language":
+        t_num = text.strip()
+        chosen = LANG_BY_NUMBER.get(t_num, "en")
+        session["lang"] = chosen
+        session["state"] = "main_menu"
+        return translate_reply(welcome_message(), chosen)
 
     if intent == "show_webapp":
         return translate_reply(web_app_message(session.get("crop"), session.get("district")), lang)
