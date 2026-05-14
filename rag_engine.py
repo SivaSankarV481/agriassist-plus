@@ -20,6 +20,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# claude-sonnet-4-6 is the latest Claude Sonnet model
+CLAUDE_MODEL = "claude-sonnet-4-20250514"
+
 # ══════════════════════════════════════════════════════════════════
 # CHEMICAL DATABASE — weather-aware, with dosage + yield impact
 # ══════════════════════════════════════════════════════════════════
@@ -491,16 +494,27 @@ class RAGEngine:
         except Exception:
             pass  # DB unavailable — use in-memory fallback
 
+    def _is_api_key_valid(self) -> bool:
+        """Returns True only if a real (non-placeholder) API key is set."""
+        key = self.api_key.strip()
+        return bool(key) and key not in ("", "your_anthropic_api_key_here")
+
+    def _anthropic_headers(self) -> dict:
+        """Standard headers for all Anthropic API calls."""
+        return {
+            "x-api-key":         self.api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type":      "application/json",
+        }
+
     def retrieve(self, query: str, crop: str = "", top_k: int = 3) -> list:
         return self.vectorizer.search(f"{crop} {query}".strip(), top_k=top_k)
 
-    # ── NEW: diagnose a farmer's problem → separate solution + recommendations ──
+    # ── diagnose_problem: used by WhatsApp AI Advisor ──────────
     def diagnose_problem(self, problem: str, context: dict) -> dict:
         """
-        Given the farmer's problem description, returns a dict with:
-          { "solution": str, "recommendations": str }
-        Both are plain text / markdown, displayed in separate panels in the UI.
-        Falls back to rule-based if no API key.
+        Returns { "solution": str, "recommendations": str }
+        Falls back to rule-based if API key is missing or call fails.
         """
         crop       = context.get("crop", "")
         district   = context.get("district", "")
@@ -549,23 +563,19 @@ FARMER'S PROBLEM:
 
 Respond ONLY in this exact JSON format (no markdown fences, no extra text):
 {{
-  "solution": "In 2-3 simple sentences: Tell the farmer WHAT disease/pest this is (use common name), WHY it happened (simple reason like weather/humidity), and WHAT they should do TODAY as first step. Example style: 'Your tomato has early blight disease. This happens when weather is humid and leaves stay wet. Today, remove the badly affected leaves and prepare to spray medicine tomorrow morning.'",
-  "recommendations": "Give 3-4 numbered action steps the farmer can follow easily. Step 1 should be the most urgent. Include: medicine name + how much to mix in 1 litre water + when to spray (morning/evening). Last step: one simple tip to prevent this problem next time. Write like giving instructions to a neighbour."
+  "solution": "In 2-3 simple sentences: Tell the farmer WHAT disease/pest this is (use common name), WHY it happened (simple reason like weather/humidity), and WHAT they should do TODAY as first step.",
+  "recommendations": "Give 3-4 numbered action steps the farmer can follow easily. Step 1 should be the most urgent. Include: medicine name + how much to mix in 1 litre water + when to spray (morning/evening). Last step: one simple tip to prevent this problem next time."
 }}"""
 
-        if not self.api_key or self.api_key.strip() in ("", "your_anthropic_api_key_here"):
+        if not self._is_api_key_valid():
             result = self._rule_based_diagnose(problem, context, chem_recs)
         else:
             try:
                 resp = requests.post(
                     "https://api.anthropic.com/v1/messages",
-                    headers={
-                        "x-api-key":         self.api_key,
-                        "anthropic-version": "2023-06-01",
-                        "content-type":      "application/json",
-                    },
+                    headers=self._anthropic_headers(),
                     json={
-                        "model":      "claude-sonnet-4-6",
+                        "model":      CLAUDE_MODEL,
                         "max_tokens": 1200,
                         "messages": [{"role": "user", "content": prompt}],
                     },
@@ -573,18 +583,24 @@ Respond ONLY in this exact JSON format (no markdown fences, no extra text):
                 )
                 resp.raise_for_status()
                 data = resp.json()
-                text = "".join(b["text"] for b in data.get("content", []) if b.get("type") == "text").strip()
-                text = re.sub(r"^```json\s*", "", text)
-                text = re.sub(r"\s*```$", "", text)
-                parsed = json.loads(text)
+                raw = "".join(b["text"] for b in data.get("content", []) if b.get("type") == "text").strip()
+                # FIX: Robust JSON fence stripping — handles ```json ... ```, ``` ... ```, and bare JSON
+                raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
+                raw = re.sub(r"\s*```\s*$", "", raw)
+                raw = raw.strip()
+                parsed = json.loads(raw)
                 result = {
                     "solution":        parsed.get("solution", "").strip(),
                     "recommendations": parsed.get("recommendations", "").strip(),
                 }
-            except Exception:
+            except json.JSONDecodeError as e:
+                print(f"⚠️  diagnose_problem JSON parse error: {e} — falling back to rule-based")
+                result = self._rule_based_diagnose(problem, context, chem_recs)
+            except Exception as e:
+                print(f"⚠️  diagnose_problem API error: {e} — falling back to rule-based")
                 result = self._rule_based_diagnose(problem, context, chem_recs)
 
-        # ── Save query + response to DB ───────────────────────
+        # ── Save to DB ─────────────────────────────────────────
         try:
             from database import get_db
             db = get_db()
@@ -616,7 +632,6 @@ Respond ONLY in this exact JSON format (no markdown fences, no extra text):
         if chem_recs is None:
             chem_recs = recommend_chemicals(crop, weather, yield_loss)
 
-        # ── Solution block ──
         prob_lower = problem.lower()
         if any(w in prob_lower for w in ["yellow","yellowing","pale"]):
             cause = "Yellowing is typically caused by nitrogen deficiency, fungal leaf spot, or waterlogging. Check roots for rot and soil moisture first."
@@ -632,40 +647,37 @@ Respond ONLY in this exact JSON format (no markdown fences, no extra text):
             cause = f"Based on the symptoms described, this appears to be a disease or stress condition affecting your {crop}. Immediate inspection and treatment is advised."
 
         solution = (
-            f"🔍 **Diagnosis for {crop}:** {cause} "
+            f"🔍 Diagnosis for {crop}: {cause} "
             f"Current weather (Humidity: {weather.get('humidity','N/A')}%, Temp: {weather.get('temp_max','N/A')}°C) "
-            f"{'is increasing disease pressure.' if weather.get('humidity',0) > 75 else 'is currently manageable.'} "
+            f"{'is increasing disease pressure.' if (weather.get('humidity') or 0) > 75 else 'is currently manageable.'} "
             f"Act within 24–48 hours to prevent further spread."
         )
 
-        # ── Recommendations block ──
         rec_lines = []
         if chem_recs["recommended"]:
             top = chem_recs["recommended"][0]
             rec_lines.append(
-                f"1. **Apply {top['name']}** ({top['type']}) — "
+                f"1. Apply {top['name']} ({top['type']}) — "
                 f"Dose: {top['dose_per_litre']} per litre | {top['dose_per_acre']}. "
                 f"Apply {top['timing']}. Expected yield recovery: +{top['yield_gain_pct']}%."
             )
         else:
-            rec_lines.append("1. **No chemical spray recommended right now** due to current weather. Wait for dry conditions.")
+            rec_lines.append("1. No chemical spray recommended right now due to current weather. Wait for dry conditions.")
 
-        rec_lines.append("2. **Remove severely affected plant parts** immediately to reduce spread of infection.")
-        rec_lines.append("3. **Improve drainage** if soil is waterlogged — standing water accelerates most fungal and bacterial diseases.")
-        rec_lines.append("4. **Monitor daily for 7 days** — if symptoms persist or worsen, escalate to a systemic fungicide.")
+        rec_lines.append("2. Remove severely affected plant parts immediately to reduce spread of infection.")
+        rec_lines.append("3. Improve drainage if soil is waterlogged — standing water accelerates most fungal and bacterial diseases.")
+        rec_lines.append("4. Monitor daily for 7 days — if symptoms persist or worsen, escalate to a systemic fungicide.")
 
         current_p = prices.get("current", 0) or 0
         future_p  = prices.get("1month", 0) or 0
         if future_p > current_p:
-            rec_lines.append(f"5. **Price tip:** {crop} prices are forecast to rise. Protect your crop now to maximise revenue at Rs.{future_p:,.0f}/Qtl next month.")
+            rec_lines.append(f"5. Price tip: {crop} prices are forecast to rise. Protect your crop now to maximise revenue at Rs.{future_p:,.0f}/Qtl next month.")
         else:
-            rec_lines.append(f"5. **Price tip:** Consider selling soon — current price is Rs.{current_p:,.0f}/Qtl. Visit Uzhavar Sandhai for 10–15% premium over APMC.")
+            rec_lines.append(f"5. Price tip: Consider selling soon — current price is Rs.{current_p:,.0f}/Qtl. Visit Uzhavar Sandhai for 10–15% premium over APMC.")
 
-        recommendations = "\n\n".join(rec_lines)
+        return {"solution": solution, "recommendations": "\n\n".join(rec_lines)}
 
-        return {"solution": solution, "recommendations": recommendations}
-
-    # ── existing recommend() method (used by the topic dropdowns) ──
+    # ── recommend: used by Streamlit web app topic dropdowns ───
     def recommend(self, query: str, context: dict) -> str:
         crop       = context.get("crop", "")
         district   = context.get("district", "")
@@ -693,99 +705,49 @@ Respond ONLY in this exact JSON format (no markdown fences, no extra text):
             lines = [f"- {a['name']}: {'; '.join(a['reasons'])}" for a in chem_recs["avoid"][:2]]
             avoid_text = "CHEMICALS TO AVOID NOW:\n" + "\n".join(lines)
 
-        # ── Build a focused prompt based on the topic of the query ──
         q_lower = query.lower()
 
         if any(k in q_lower for k in ["sell", "wait", "price", "market"]):
             topic_instruction = f"""Answer ONLY the question: Should the farmer sell now or wait?
-
 Base your answer strictly on these price numbers:
 - Current price: Rs.{prices.get('current', 'N/A')}/Qtl
 - 1 Week forecast: Rs.{prices.get('1week', 'N/A')}/Qtl
 - 1 Month forecast: Rs.{prices.get('1month', 'N/A')}/Qtl
 - Yield loss risk: {yield_loss:.1f}%
-
-Give:
-1. A clear SELL NOW or WAIT recommendation with reason
-2. Best time/market to sell (e.g. Uzhavar Sandhai for premium)
-3. How yield loss risk affects the decision
-
-Do NOT talk about chemicals, diseases, or weather unless directly relevant to the sell decision.
-Keep under 180 words."""
+Give: 1. A clear SELL NOW or WAIT recommendation with reason. 2. Best time/market to sell. 3. How yield loss risk affects the decision.
+Do NOT talk about chemicals, diseases, or weather unless directly relevant. Keep under 180 words."""
 
         elif any(k in q_lower for k in ["disease", "watch", "treat", "pest", "symptom"]):
-            topic_instruction = f"""Answer ONLY the question: What diseases or pests should this farmer watch for and how to treat them?
-
-Focus on:
-1. Top 2-3 diseases/pests most common for {crop} in {district} given current weather (Temp {weather.get('temp_max','N/A')}°C, Humidity {weather.get('humidity','N/A')}%, Rainfall {weather.get('rainfall','N/A')}mm)
-2. Key symptoms to watch for (simple descriptions)
-3. Treatment for each: chemical name + dose per litre + timing
-
-Use the knowledge base and chemical data provided.
-Do NOT talk about price, selling decisions, or yield loss percentage.
-Keep under 200 words."""
+            topic_instruction = f"""Answer ONLY: What diseases or pests should this farmer watch for and how to treat them?
+Focus on: 1. Top 2-3 diseases/pests most common for {crop} in {district} given current weather (Temp {weather.get('temp_max','N/A')}°C, Humidity {weather.get('humidity','N/A')}%). 2. Key symptoms to watch for. 3. Treatment: chemical name + dose per litre + timing.
+Do NOT talk about price, selling, or yield loss percentage. Keep under 200 words."""
 
         elif any(k in q_lower for k in ["profit", "improve", "income", "earn", "revenue"]):
-            topic_instruction = f"""Answer ONLY the question: How can this farmer improve their profit for {crop}?
-
-Focus on:
-1. Price strategies (best market, best time to sell, grading/quality tips)
-2. Input cost reduction tips
-3. One practical step to increase yield or reduce loss
-
-Use these price forecasts:
-- Current: Rs.{prices.get('current', 'N/A')}/Qtl → 1 Month: Rs.{prices.get('1month', 'N/A')}/Qtl
-
-Do NOT talk about specific chemical doses or disease names unless directly tied to profit improvement.
-Keep under 180 words."""
+            topic_instruction = f"""Answer ONLY: How can this farmer improve their profit for {crop}?
+Focus on: 1. Price strategies. 2. Input cost reduction tips. 3. One practical step to increase yield.
+Prices: Current Rs.{prices.get('current', 'N/A')}/Qtl → 1 Month Rs.{prices.get('1month', 'N/A')}/Qtl. Keep under 180 words."""
 
         elif any(k in q_lower for k in ["weather", "rain", "temperature", "humid", "climate"]):
-            topic_instruction = f"""Answer ONLY the question: Is the current weather good for this crop and what should the farmer do?
-
-Current weather data:
-- Temperature: {weather.get('temp_max','N/A')}°C
-- Humidity: {weather.get('humidity','N/A')}%
-- Rainfall (7-day): {weather.get('rainfall','N/A')}mm
-
-Focus on:
-1. Whether these conditions are good or risky for {crop} right now
-2. Specific weather-related risks (e.g. fungal disease from humidity, heat stress, waterlogging)
-3. 2-3 actions the farmer should take based on current weather
-
-Do NOT talk about prices, selling, or general crop advice unrelated to weather.
-Keep under 180 words."""
+            topic_instruction = f"""Answer ONLY: Is the current weather good for this crop and what should the farmer do?
+Weather: Temp {weather.get('temp_max','N/A')}°C, Humidity {weather.get('humidity','N/A')}%, Rainfall {weather.get('rainfall','N/A')}mm.
+Focus on: 1. Whether conditions are good or risky for {crop}. 2. Specific weather-related risks. 3. 2-3 actions the farmer should take.
+Do NOT talk about prices or general crop advice unrelated to weather. Keep under 180 words."""
 
         elif any(k in q_lower for k in ["harvest", "when", "time to harvest", "ready"]):
-            topic_instruction = f"""Answer ONLY the question: When is the best time to harvest {crop} and how should the farmer decide?
-
-Focus on:
-1. Signs that {crop} is ready to harvest (visual/physical indicators)
-2. Best time of day/season to harvest for quality
-3. How current weather ({weather.get('temp_max','N/A')}°C, Humidity {weather.get('humidity','N/A')}%) affects harvest timing
-4. Post-harvest handling tip to preserve quality
-
-Do NOT talk about chemicals, diseases, or selling prices.
-Keep under 180 words."""
+            topic_instruction = f"""Answer ONLY: When is the best time to harvest {crop}?
+Focus on: 1. Signs that {crop} is ready to harvest. 2. Best time of day/season. 3. How current weather ({weather.get('temp_max','N/A')}°C, {weather.get('humidity','N/A')}% humidity) affects harvest timing. 4. Post-harvest handling tip.
+Do NOT talk about chemicals, diseases, or selling prices. Keep under 180 words."""
 
         elif any(k in q_lower for k in ["yield", "loss", "reduce", "production"]):
-            topic_instruction = f"""Answer ONLY the question: How can this farmer reduce yield loss for {crop}?
-
-Current yield loss risk: {yield_loss:.1f}%
-
-Focus on:
-1. The most likely causes of yield loss for {crop} right now given the weather
-2. Top 3 practical steps to reduce yield loss immediately
-3. One preventive measure for the next growing season
-
-Do NOT give general crop advice, price info, or selling tips.
-Keep under 180 words."""
+            topic_instruction = f"""Answer ONLY: How can this farmer reduce yield loss for {crop}?
+Current yield loss risk: {yield_loss:.1f}%.
+Focus on: 1. Most likely causes of yield loss right now. 2. Top 3 practical steps to reduce yield loss immediately. 3. One preventive measure for next season.
+Do NOT give general crop advice, price info, or selling tips. Keep under 180 words."""
 
         else:
             topic_instruction = f"""Answer this specific question for the farmer: {query}
-
 Be direct and practical. Give only information relevant to the question asked.
-Farmer context: {crop} in {district}, yield loss risk {yield_loss:.1f}%.
-Keep under 180 words."""
+Farmer context: {crop} in {district}, yield loss risk {yield_loss:.1f}%. Keep under 180 words."""
 
         prompt = f"""You are AgriAssist+, a senior agricultural expert for Tamil Nadu farmers.
 Give practical, specific advice a farmer can act on today. Use simple language.
@@ -806,19 +768,15 @@ KNOWLEDGE BASE:
 INSTRUCTION:
 {topic_instruction}"""
 
-        if not self.api_key or self.api_key.strip() in ("", "your_anthropic_api_key_here"):
+        if not self._is_api_key_valid():
             answer = self._rule_based(context, docs, query, chem_recs)
         else:
             try:
                 resp = requests.post(
                     "https://api.anthropic.com/v1/messages",
-                    headers={
-                        "x-api-key":         self.api_key,
-                        "anthropic-version": "2023-06-01",
-                        "content-type":      "application/json",
-                    },
+                    headers=self._anthropic_headers(),
                     json={
-                        "model":      "claude-sonnet-4-6",
+                        "model":      CLAUDE_MODEL,
                         "max_tokens": 900,
                         "messages": [{"role": "user", "content": prompt}],
                     },
@@ -828,10 +786,11 @@ INSTRUCTION:
                 data = resp.json()
                 text_blocks = [b["text"] for b in data.get("content", []) if b.get("type") == "text"]
                 answer = "\n".join(text_blocks).strip()
-            except Exception:
+            except Exception as e:
+                print(f"⚠️  recommend API error: {e} — falling back to rule-based")
                 answer = self._rule_based(context, docs, query, chem_recs)
 
-        # ── Save query + response to DB ───────────────────────
+        # ── Save to DB ─────────────────────────────────────────
         try:
             from database import get_db
             db = get_db()
@@ -868,41 +827,38 @@ INSTRUCTION:
         pct     = (diff / current * 100) if current > 0 else 0
         q_lower = query.lower()
 
-        # ── SELL / WAIT ──
         if any(k in q_lower for k in ["sell", "wait", "price", "market"]):
             if pct > 8 and yield_loss <= 15:
-                decision = f"⏳ **WAIT — prices rising {pct:.1f}% next month** (Rs.{future:,.0f}/Qtl). Low yield risk means you can hold safely."
+                decision = f"⏳ WAIT — prices rising {pct:.1f}% next month (Rs.{future:,.0f}/Qtl). Low yield risk means you can hold safely."
             elif pct > 3 and yield_loss <= 20:
-                decision = f"📅 **WAIT 1 WEEK** — prices forecast up {pct:.1f}% (Rs.{p1w:,.0f}/Qtl in 1 week). Moderate risk — sell within 7 days."
+                decision = f"📅 WAIT 1 WEEK — prices forecast up {pct:.1f}% (Rs.{p1w:,.0f}/Qtl in 1 week). Moderate risk — sell within 7 days."
             elif yield_loss > 25:
-                decision = f"🚨 **SELL NOW** — high yield loss risk ({yield_loss:.0f}%) means delay costs more than any price gain."
+                decision = f"🚨 SELL NOW — high yield loss risk ({yield_loss:.0f}%) means delay costs more than any price gain."
             else:
-                decision = f"✅ **SELL NOW** — prices stable at Rs.{current:,.0f}/Qtl with no major rise forecast."
+                decision = f"✅ SELL NOW — prices stable at Rs.{current:,.0f}/Qtl with no major rise forecast."
             return (
                 f"{decision}\n\n"
-                f"📊 **Price Summary:**\n"
+                f"📊 Price Summary:\n"
                 f"  • Current: Rs.{current:,.0f}/Qtl\n"
                 f"  • 1 Week:  Rs.{p1w:,.0f}/Qtl\n"
                 f"  • 1 Month: Rs.{future:,.0f}/Qtl\n\n"
-                f"🛒 **Best markets:** Uzhavar Sandhai gives 10–15% premium over APMC. e-NAM platform available for online selling."
+                f"🛒 Best markets: Uzhavar Sandhai gives 10–15% premium over APMC. e-NAM platform available for online selling."
             )
 
-        # ── DISEASES ──
         elif any(k in q_lower for k in ["disease", "watch", "treat", "pest", "symptom"]):
-            parts = [f"🦠 **Common diseases to watch for in {crop}:**\n"]
+            parts = [f"🦠 Common diseases to watch for in {crop}:\n"]
             for doc in docs:
                 if "disease" in doc.get("topic", "") or "chemical" in doc.get("topic", ""):
                     parts.append(doc["text"][:300])
                     break
             if chem_recs["recommended"]:
                 top = chem_recs["recommended"][0]
-                parts.append(f"\n💊 **Treatment now:** {top['name']} — Mix {top['dose_per_litre']} per litre. {top['timing']}.")
+                parts.append(f"\n💊 Treatment now: {top['name']} — Mix {top['dose_per_litre']} per litre. {top['timing']}.")
             return "\n".join(parts)
 
-        # ── PROFIT ──
         elif any(k in q_lower for k in ["profit", "improve", "income", "earn", "revenue"]):
             tips = [
-                f"💰 **Profit tips for {crop}:**",
+                f"💰 Profit tips for {crop}:",
                 f"1. Sell at Uzhavar Sandhai for 10–15% more than APMC price.",
                 f"2. Grade your produce — A-grade fetches Rs.{int(current*1.15):,}/Qtl vs Rs.{current:,.0f}/Qtl for mixed grade.",
                 f"3. Reduce input cost: IPM (neem oil + targeted spray) cuts chemical cost by 25%.",
@@ -913,52 +869,47 @@ INSTRUCTION:
                 tips.append(f"4. Sell now — prices stable, no major rise expected.")
             return "\n".join(tips)
 
-        # ── WEATHER ──
         elif any(k in q_lower for k in ["weather", "rain", "temperature", "humid", "climate"]):
             notes = "\n".join(f"  • {n}" for n in chem_recs["weather_notes"])
             temp = weather.get("temp_max", "N/A")
             hum  = weather.get("humidity", "N/A")
             rain = weather.get("rainfall", "N/A")
-            status = "✅ Favourable" if not chem_recs["weather_notes"][0].startswith("✅") is False else "⚠️ Caution needed"
             return (
-                f"🌦️ **Weather for {crop} — {context.get('district','')}:**\n"
+                f"🌦️ Weather for {crop} — {context.get('district','')}:\n"
                 f"  • Temp: {temp}°C | Humidity: {hum}% | Rainfall: {rain}mm\n\n"
-                f"**Weather alerts:**\n{notes}"
+                f"Weather alerts:\n{notes}"
             )
 
-        # ── HARVEST ──
         elif any(k in q_lower for k in ["harvest", "when", "time to harvest", "ready"]):
             return (
-                f"🌾 **Harvest timing for {crop}:**\n\n"
-                f"1. Harvest when crop shows maturity signs (colour change, firmness, dry outer layers depending on crop).\n"
-                f"2. Best time: **early morning** when temperature is coolest — reduces moisture loss and spoilage.\n"
+                f"🌾 Harvest timing for {crop}:\n\n"
+                f"1. Harvest when crop shows maturity signs (colour change, firmness, dry outer layers).\n"
+                f"2. Best time: early morning when temperature is coolest — reduces moisture loss and spoilage.\n"
                 f"3. Current weather ({weather.get('temp_max','N/A')}°C, {weather.get('humidity','N/A')}% humidity): "
                 + ("High humidity — harvest quickly and dry produce to prevent mould." if (weather.get('humidity') or 0) > 75
                    else "Conditions are suitable for harvesting now.") +
                 f"\n4. Post-harvest: store in cool, dry, ventilated area. Sort and grade immediately to get better price."
             )
 
-        # ── YIELD LOSS ──
         elif any(k in q_lower for k in ["yield", "loss", "reduce", "production"]):
             icon = "🔴" if yield_loss > 25 else "🟠" if yield_loss > 10 else "🟢"
             steps = [
-                f"{icon} **Yield loss risk: {yield_loss:.1f}%**\n",
-                f"**Top steps to reduce yield loss:**",
+                f"{icon} Yield loss risk: {yield_loss:.1f}%\n",
+                f"Top steps to reduce yield loss:",
                 f"1. Apply preventive fungicide/insecticide at first sign of disease — delay of 5 days reduces efficacy 40%.",
                 f"2. Ensure proper drainage — waterlogging causes 20–30% yield loss in most crops.",
                 f"3. Use drip irrigation — saves 40% water and improves yield 20–30%.",
             ]
             if chem_recs["recommended"]:
                 top = chem_recs["recommended"][0]
-                steps.append(f"4. **Apply {top['name']} now** ({top['dose_per_litre']} per litre) — expected yield recovery: +{top['yield_gain_pct']}%.")
-            steps.append(f"5. **Next season:** use certified seeds (+30% yield) and get soil tested every 3 years.")
+                steps.append(f"4. Apply {top['name']} now ({top['dose_per_litre']} per litre) — expected yield recovery: +{top['yield_gain_pct']}%.")
+            steps.append(f"5. Next season: use certified seeds (+30% yield) and get soil tested every 3 years.")
             return "\n".join(steps)
 
-        # ── GENERIC FALLBACK ──
         else:
             doc_text = docs[0]["text"][:300] if docs else "No specific data found."
             return (
-                f"📋 **Advice for {crop} — {context.get('district','')}:**\n\n"
+                f"📋 Advice for {crop} — {context.get('district','')}:\n\n"
                 f"{doc_text}\n\n"
                 f"Current price: Rs.{current:,.0f}/Qtl | Yield risk: {yield_loss:.1f}%"
             )
@@ -970,11 +921,9 @@ INSTRUCTION:
     def llm_chemical_advice(self, crop: str, disease_input: str, weather: dict,
                              chem_res: dict, yield_loss: float, district: str) -> str:
         """
-        Uses Claude Sonnet to generate intelligent, contextual chemical advice
-        based on the farmer's described disease/problem + weather + rule-based chemical results.
-        Falls back to a formatted rule-based summary if no API key.
+        Chemical advice via Claude Sonnet. Falls back to rule-based if no API key.
         """
-        if not self.api_key or self.api_key.strip() in ("", "your_anthropic_api_key_here"):
+        if not self._is_api_key_valid():
             return self._rule_based_chemical_summary(crop, disease_input, chem_res, weather, yield_loss)
 
         rec_lines = []
@@ -986,7 +935,6 @@ INSTRUCTION:
         avoid_lines = [
             f"- {a['name']}: {'; '.join(a['reasons'])}" for a in chem_res["avoid"][:3]
         ]
-        weather_notes = "\n".join(chem_res["weather_notes"])
 
         prompt = f"""You are AgriAssist+, a helpful chemical advisor for Tamil Nadu farmers using WhatsApp.
 A farmer described a crop problem. Give ONLY the chemical recommendation in simple farmer language.
@@ -1003,33 +951,27 @@ WEATHER-SAFE CHEMICALS (use only from this list):
 WRITE EXACTLY IN THIS FORMAT (4 sections, no extra text):
 
 💊 *Medicine to Use:*
-[Name of the chemical. One line only. If no safe chemical available, say 'Wait for weather to improve before spraying'.]
+[Name of the chemical. One line only.]
 
 🧪 *How to Mix & Apply:*
-[Tell the farmer exactly: how much to mix in 1 litre of water, when to spray (morning/evening), how many times per week. Use simple words like 'Mix 2.5g in 1 litre water. Spray in the morning before 9am. Repeat every 7 days.']
+[Exact dose in 1 litre water, when to spray (morning/evening), how often. Simple words.]
 
 💰 *Will this help your price?:*
-[One clear sentence. If treating now can protect yield and help the farmer get a better price or avoid loss, say so simply. Example: 'Yes — treating now protects your crop, so you can sell at full price instead of selling damaged crop cheap.']
+[One clear sentence about whether treating now protects yield and price.]
 
 ⚠️ *Safety Reminder:*
-[One practical safety tip. Example: 'Wear gloves and mask while spraying. Do not sell crop for 7 days after spraying.']
+[One practical safety tip including PHI/waiting period.]
 
 Rules:
-- Simple English only. No bullet sub-lists. No jargon.
-- Keep total response under 200 words.
-- Do NOT repeat the farmer's problem back to them.
-- Do NOT add any section beyond these 4."""
+- Simple English only. No bullet sub-lists. No jargon. Keep total under 200 words.
+- Do NOT repeat the farmer's problem. Do NOT add any section beyond these 4."""
 
         try:
             resp = requests.post(
                 "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key":         self.api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type":      "application/json",
-                },
+                headers=self._anthropic_headers(),
                 json={
-                    "model":      "claude-sonnet-4-6",
+                    "model":      CLAUDE_MODEL,
                     "max_tokens": 900,
                     "messages": [{"role": "user", "content": prompt}],
                 },
@@ -1040,7 +982,8 @@ Rules:
             return "\n".join(
                 b["text"] for b in data.get("content", []) if b.get("type") == "text"
             ).strip()
-        except Exception:
+        except Exception as e:
+            print(f"⚠️  llm_chemical_advice API error: {e} — falling back to rule-based")
             return self._rule_based_chemical_summary(crop, disease_input, chem_res, weather, yield_loss)
 
     def _rule_based_chemical_summary(self, crop: str, disease_input: str,
@@ -1048,40 +991,33 @@ Rules:
         """Fallback 4-section summary when LLM is unavailable."""
         lines = []
 
-        # Section 1 — Medicine
+        lines.append("💊 *Medicine to Use:*")
         if chem_res["recommended"]:
             top = chem_res["recommended"][0]
-            lines.append(f"💊 *Medicine to Use:*")
             lines.append(f"{top['name']} ({top['type']})")
         else:
-            lines.append("💊 *Medicine to Use:*")
             lines.append("Wait for weather to improve before spraying. Conditions are not suitable right now.")
 
         lines.append("")
-
-        # Section 2 — How to Mix & Apply
         lines.append("🧪 *How to Mix & Apply:*")
         if chem_res["recommended"]:
             top = chem_res["recommended"][0]
             lines.append(
                 f"Mix {top['dose_per_litre']} in 1 litre of water. "
-                f"{top['timing']}. "
-                f"Repeat {top['frequency'].lower()}."
+                f"{top['timing']}. Repeat {top['frequency'].lower()}."
             )
         else:
             lines.append("Do not spray now. Wait until rainfall stops and weather is dry for 2 days.")
 
         lines.append("")
-
-        # Section 3 — Price impact
         lines.append("💰 *Will this help your price?:*")
         if chem_res["recommended"]:
             top = chem_res["recommended"][0]
             gain = top.get("yield_gain_pct", 10)
             if yield_loss > 15:
                 lines.append(
-                    f"Yes — treating now can recover up to {gain}% of your yield. "
-                    f"A healthier crop sells at full market price instead of being sold cheap as damaged crop."
+                    f"Yes — treating now can recover up to {gain}% of your yield, "
+                    f"so you can sell {crop} at full market price instead of discounted damaged crop."
                 )
             else:
                 lines.append(
@@ -1092,13 +1028,10 @@ Rules:
             lines.append("Skipping spray now protects crop quality. Spraying in bad weather can damage leaves and reduce your price.")
 
         lines.append("")
-
-        # Section 4 — Safety
         lines.append("⚠️ *Safety Reminder:*")
         if chem_res["recommended"]:
             top = chem_res["recommended"][0]
-            safety = top.get("safety", "Wear gloves and mask while spraying.")
-            lines.append(safety)
+            lines.append(top.get("safety", "Wear gloves and mask while spraying."))
         else:
             lines.append("Wear gloves and mask whenever handling chemicals. Store chemicals away from children.")
 

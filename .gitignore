@@ -18,7 +18,6 @@ build/
 venv/
 env/
 .venv/
-.env/
 
 # ── IDE / OS ──────────────────────────────────────────────────────
 .vscode/
@@ -37,18 +36,16 @@ desktop.ini
 *.log
 logs/
 
-# ── Generated model & data files ────────────────────────────────────
-# NOTE: joblib models and dataset ARE included so Streamlit Cloud can run
-# without needing to re-train. Uncomment below only for local dev.
-# *.joblib
-# tn_agri_dataset.csv
-
-# ── Untracked local files (show green in VS Code) ────────────────────
-future_1m_model.joblib
-future_1w_model.joblib
-future_2w_model.joblib
-whatsapp_bot.py
-
-# ── Database ─────────────────────────────────────────────────────
+# ── Database files ────────────────────────────────────────────────
 *.sqlite3
 *.db
+
+# ── CNN model weights (large files — train locally, don't push to GitHub) ──
+tomato_early_blight_model.h5
+mango_variety_model.h5
+plant_disease_cnn_model.h5
+*.h5
+*.keras
+
+# ── DO NOT ignore these — Streamlit Cloud needs them ─────────────
+# (all .py files, .joblib models, .csv dataset are included)

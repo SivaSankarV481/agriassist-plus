@@ -15,10 +15,12 @@ import os
 import plotly.graph_objects as go
 from datetime import date
 from dotenv import load_dotenv
+from PIL import Image
 
 from weather import get_weather, weather_code_label
 from rag_engine import RAGEngine
 from database import get_db
+from plant_disease_cnn import PlantDiseaseDetector, MangoVarietyDetector
 
 # ── Initialise DB on startup ────────────────────────────────
 @st.cache_resource
@@ -76,6 +78,7 @@ st.markdown("""
 .banner-blue   { background: rgba(13,71,161,0.50);  border-left: 5px solid #82b1ff; }
 .banner-orange { background: rgba(180,80,0,0.50);   border-left: 5px solid #ffab40; }
 .banner-info   { background: rgba(1,87,155,0.45);   border-left: 5px solid #40c4ff; }
+.banner-mango  { background: rgba(180,100,0,0.50);  border-left: 5px solid #ffcc02; }
 .section-header {
     font-size: 1.2em;
     font-weight: 700;
@@ -131,7 +134,44 @@ st.markdown("""
     line-height: 1.7;
 }
 .yield-box b { color: #ffffff !important; }
-
+.cnn-result-card {
+    background: rgba(13,71,161,0.35);
+    border: 2px solid rgba(130,177,255,0.5);
+    border-radius: 14px;
+    padding: 20px 24px;
+    margin: 12px 0;
+    color: #e3f2fd;
+    line-height: 1.8;
+}
+.cnn-healthy {
+    background: rgba(27,94,32,0.45);
+    border: 2px solid rgba(105,240,174,0.5);
+}
+.cnn-disease {
+    background: rgba(183,28,28,0.40);
+    border: 2px solid rgba(255,82,82,0.5);
+}
+.cnn-warning {
+    background: rgba(180,80,0,0.40);
+    border: 2px solid rgba(255,171,64,0.5);
+}
+.mango-card {
+    background: rgba(120,60,0,0.40);
+    border: 2px solid rgba(255,204,2,0.6);
+    border-radius: 14px;
+    padding: 20px 24px;
+    margin: 12px 0;
+    color: #fff8e1;
+    line-height: 1.8;
+}
+.mango-healthy {
+    background: rgba(27,94,32,0.45);
+    border: 2px solid rgba(255,204,2,0.5);
+}
+.mango-diseased {
+    background: rgba(183,28,28,0.40);
+    border: 2px solid rgba(255,82,82,0.5);
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -189,10 +229,20 @@ def load_dataset():
 def load_rag():
     return RAGEngine()
 
-models  = load_models()
-meta    = load_meta()
-df      = load_dataset()
-rag     = load_rag()
+@st.cache_resource
+def load_cnn_detector():
+    return PlantDiseaseDetector()
+
+@st.cache_resource
+def load_mango_detector():
+    return MangoVarietyDetector()
+
+models        = load_models()
+meta          = load_meta()
+df            = load_dataset()
+rag           = load_rag()
+detector      = load_cnn_detector()
+mango_detector = load_mango_detector()
 
 # ─────────────────────────────────────────────
 # Startup check
@@ -306,11 +356,9 @@ def trend_icon(base, compare):
     return f"➡️ {d:+.1f}%"
 
 def qtl_to_kg(price_qtl):
-    """Convert Rs./Quintal to Rs./kg (1 Qtl = 100 kg)"""
     return round(price_qtl / 100, 2) if price_qtl else 0
 
 def fmt_price(price_qtl):
-    """Format price showing both Rs./kg and Rs./Qtl"""
     kg = qtl_to_kg(price_qtl)
     return f"Rs.{kg:.2f}/kg", f"Rs.{price_qtl:,.0f}/Qtl"
 
@@ -339,21 +387,33 @@ with st.sidebar:
     predict_btn = st.button("🔮 Predict & Analyze", use_container_width=True, type="primary")
     st.markdown("---")
 
+    # CNN status in sidebar
+    st.markdown("**🧠 AI Detection Models**")
+    if detector.cnn_available:
+        st.success("🍅 Tomato CNN: Ready")
+    else:
+        st.info("🍅 Tomato: Claude Vision mode")
+    if mango_detector.cnn_available:
+        st.success("🥭 Mango CNN: Ready")
+    else:
+        st.info("🥭 Mango: Claude Vision mode")
+
 # ─────────────────────────────────────────────
 # HEADER
 # ─────────────────────────────────────────────
 st.title("🌾 AgriAssist+ — Tamil Nadu Crop Intelligence")
-st.markdown("*Predict prices · Assess yield risk · Get AI-powered advice — all in one place*")
+st.markdown("*Predict prices · Assess yield risk · Get AI-powered advice · Identify diseases from photos*")
 
 # ─────────────────────────────────────────────
 # TABS
 # ─────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "📊 Price Prediction",
     "🌦️ Weather & Yield Risk",
     "🤖 AI Advisor",
     "🧪 Chemical Advisor",
     "📈 Market Trends",
+    "📷 Disease Detection (CNN)",
 ])
 
 # ══════════════════════════════════════════════
@@ -377,7 +437,6 @@ with tab1:
                 "yield_loss": yl, "crop": selected_crop,
                 "district": selected_district, "predicted": True,
             })
-            # ── Save prediction to MySQL ────────────────────────
             if db.is_connected:
                 session_id = st.session_state.get("session_id", "streamlit")
                 db.upsert_session(session_id, selected_crop, selected_district)
@@ -470,36 +529,26 @@ with tab1:
         price_trend_1w = ((p1w - cur) / cur * 100) if p1w and cur else 0
 
         if yl > 25 and price_trend_1m <= 2:
-            sell_icon    = "🚨"
-            sell_decision = "SELL NOW"
-            sell_cls     = "banner-red"
-            sell_reason  = f"High yield risk ({yl:.0f}%) + prices not rising significantly. Every day of delay risks more loss."
+            sell_icon = "🚨"; sell_decision = "SELL NOW"; sell_cls = "banner-red"
+            sell_reason = f"High yield risk ({yl:.0f}%) + prices not rising significantly."
         elif yl > 25 and price_trend_1m > 2:
-            sell_icon    = "⚠️"
-            sell_decision = "SELL WITHIN 1 WEEK"
-            sell_cls     = "banner-orange"
-            sell_reason  = f"High yield risk ({yl:.0f}%) — even though prices may rise slightly, crop loss will outweigh gains. Sell soon."
+            sell_icon = "⚠️"; sell_decision = "SELL WITHIN 1 WEEK"; sell_cls = "banner-orange"
+            sell_reason = f"High yield risk ({yl:.0f}%) — sell soon."
         elif price_trend_1m > 8 and yl <= 15:
-            sell_icon    = "⏳"
-            sell_decision = "WAIT — HOLD FOR 1 MONTH"
-            sell_cls     = "banner-green"
-            sell_reason  = f"Prices forecast to rise {price_trend_1m:.1f}% in 1 month (Rs.{qtl_to_kg(p1m):.2f}/kg) and yield risk is low. Holding is profitable."
+            sell_icon = "⏳"; sell_decision = "WAIT — HOLD FOR 1 MONTH"; sell_cls = "banner-green"
+            sell_reason = f"Prices forecast to rise {price_trend_1m:.1f}% (Rs.{qtl_to_kg(p1m):.2f}/kg)."
         elif price_trend_1w > 3 and yl <= 20:
-            sell_icon    = "📅"
-            sell_decision = "WAIT — SELL IN 1 WEEK"
-            sell_cls     = "banner-blue"
-            sell_reason  = f"Prices rising {price_trend_1w:.1f}% this week. Low-moderate risk — hold a few more days for better return."
+            sell_icon = "📅"; sell_decision = "WAIT — SELL IN 1 WEEK"; sell_cls = "banner-blue"
+            sell_reason = f"Prices rising {price_trend_1w:.1f}% this week."
         else:
-            sell_icon    = "✅"
-            sell_decision = "SELL NOW — PRICES ARE STABLE"
-            sell_cls     = "banner-yellow"
-            sell_reason  = f"Prices are stable with no major upside forecast. Selling now avoids storage costs and yield risk."
+            sell_icon = "✅"; sell_decision = "SELL NOW — PRICES ARE STABLE"; sell_cls = "banner-yellow"
+            sell_reason = "Prices stable with no major upside forecast."
 
         st.markdown(f"""
 <div class="banner yield-box {yl_cls}">
 {yl_icon} <b>Yield Loss Estimate: {yl:.1f}% — {yl_label}</b><br>
 For your {yield_qty:.0f} Qtl crop: Estimated loss = <b>{est_loss:.1f} Qtl</b>
-(Rs. <b>{est_val:,.0f}</b> at current price of Rs.{cur_kg:.2f}/kg = Rs.{cur:,.0f}/Qtl)
+(Rs. <b>{est_val:,.0f}</b> at current price of Rs.{cur_kg:.2f}/kg)
 </div>""", unsafe_allow_html=True)
 
         st.markdown(f"""
@@ -554,26 +603,20 @@ with tab2:
         hum  = avg.get("humidity", 60)
 
         alerts = []
-        if tmax > 38:
-            alerts.append(("🌡️ Heat Stress",        f"Max temp {tmax}°C — risk for tomato, brinjal, chilli."))
-        if tmax < 15:
-            alerts.append(("❄️ Cold Stress",         f"Min temp below 15°C — risk for banana, papaya, coconut."))
-        if rain > 150:
-            alerts.append(("🌊 Flood Risk",          f"Heavy rainfall {rain:.0f}mm — check drainage immediately."))
-        if rain < 5:
-            alerts.append(("🏜️ Drought Risk",        f"Very low rainfall {rain:.0f}mm — irrigation needed."))
-        if hum > 80:
-            alerts.append(("🦠 Fungal Disease Risk", f"Humidity {hum:.0f}% — spray preventive fungicide."))
-        if not alerts:
-            alerts.append(("✅ Favourable Conditions", "Weather conditions are normal. No immediate alerts."))
+        if tmax > 38: alerts.append(("🌡️ Heat Stress", f"Max temp {tmax}°C — risk for tomato, brinjal, chilli."))
+        if tmax < 15: alerts.append(("❄️ Cold Stress", f"Min temp below 15°C — risk for banana, papaya, coconut."))
+        if rain > 150: alerts.append(("🌊 Flood Risk", f"Heavy rainfall {rain:.0f}mm — check drainage immediately."))
+        if rain < 5:  alerts.append(("🏜️ Drought Risk", f"Very low rainfall {rain:.0f}mm — irrigation needed."))
+        if hum > 80:  alerts.append(("🦠 Fungal Disease Risk", f"Humidity {hum:.0f}% — spray preventive fungicide."))
+        if not alerts: alerts.append(("✅ Favourable Conditions", "Weather conditions are normal. No immediate alerts."))
 
         alert_cls_map = {
             "✅ Favourable Conditions": "banner-green",
-            "🌡️ Heat Stress":           "banner-red",
-            "❄️ Cold Stress":           "banner-blue",
-            "🌊 Flood Risk":            "banner-blue",
-            "🏜️ Drought Risk":          "banner-yellow",
-            "🦠 Fungal Disease Risk":   "banner-orange",
+            "🌡️ Heat Stress": "banner-red",
+            "❄️ Cold Stress": "banner-blue",
+            "🌊 Flood Risk": "banner-blue",
+            "🏜️ Drought Risk": "banner-yellow",
+            "🦠 Fungal Disease Risk": "banner-orange",
         }
         for title, msg in alerts:
             acls = alert_cls_map.get(title, "banner-info")
@@ -589,7 +632,6 @@ with tab2:
 # TAB 3 — AI ADVISOR
 # ══════════════════════════════════════════════
 with tab3:
-
     if not st.session_state.get("predicted", False):
         st.warning("💡 For best results: first run **Predict & Analyze** from the sidebar, then ask here.")
 
@@ -616,19 +658,13 @@ with tab3:
         key="shared_problem_input",
     )
 
-    diagnose_btn = st.button(
-        "🔬 Analyze My Problem",
-        type="primary",
-        key="diagnose_btn",
-        use_container_width=True,
-    )
+    diagnose_btn = st.button("🔬 Analyze My Problem", type="primary", key="diagnose_btn", use_container_width=True)
 
     if diagnose_btn:
         if not problem_input.strip():
             st.warning("⚠️ Please describe your crop problem first.")
         else:
             ctx = build_context()
-
             with st.spinner("🤖 Diagnosing your problem..."):
                 diag = rag.diagnose_problem(problem_input.strip(), ctx)
             st.session_state["diagnosis_result"]  = diag
@@ -656,10 +692,7 @@ with tab3:
         problem = st.session_state.get("diagnosis_problem", "")
 
         st.markdown("---")
-        st.markdown(
-            f'<div class="section-header">🧠 AI Analysis — {st.session_state.get("crop", selected_crop)}</div>',
-            unsafe_allow_html=True,
-        )
+        st.markdown(f'<div class="section-header">🧠 AI Analysis — {st.session_state.get("crop", selected_crop)}</div>', unsafe_allow_html=True)
         if problem:
             st.caption(f"📝 Problem: {problem[:160]}{'...' if len(problem) > 160 else ''}")
 
@@ -735,7 +768,7 @@ with tab4:
 
     chem_disease_input = st.text_area(
         "🦠 Describe the disease or problem with your crop",
-        placeholder="e.g. Leaves are turning yellow with brown spots. White powder on stems. Fruits are rotting before harvest.",
+        placeholder="e.g. Leaves are turning yellow with brown spots. White powder on stems.",
         height=90,
         key="chem_disease_input",
     )
@@ -758,9 +791,9 @@ with tab4:
 
         if ai_chem_btn:
             if not chem_disease_input.strip():
-                st.warning("⚠️ Please describe your crop disease or problem above before getting AI advice.")
+                st.warning("⚠️ Please describe your crop disease or problem above.")
             else:
-                with st.spinner("🤖 Claude is analysing your crop problem and generating a chemical treatment plan..."):
+                with st.spinner("🤖 Generating chemical treatment plan..."):
                     ai_chem_result = rag.llm_chemical_advice(
                         crop=chem_crop_sel,
                         disease_input=chem_disease_input.strip(),
@@ -775,10 +808,7 @@ with tab4:
         if st.session_state.get("ai_chem_result"):
             st.markdown('<div class="section-header">🤖 AI Chemical Treatment Plan</div>', unsafe_allow_html=True)
             st.caption(f"📝 Problem: {st.session_state.get('ai_chem_problem', '')[:160]}")
-            st.markdown(
-                f'<div class="ai-response">{st.session_state["ai_chem_result"]}</div>',
-                unsafe_allow_html=True,
-            )
+            st.markdown(f'<div class="ai-response">{st.session_state["ai_chem_result"]}</div>', unsafe_allow_html=True)
             st.markdown("---")
 
         st.markdown('<div class="section-header">🌦️ Current Weather Snapshot</div>', unsafe_allow_html=True)
@@ -801,21 +831,19 @@ with tab4:
                          else "#ffd740" if chem["yield_gain_pct"] >= 10 else "#90caf9"
                 st.markdown(f"""
 <div class="banner banner-green" style="margin-bottom:14px;">
-  <div style="font-size:1.05em;font-weight:700;margin-bottom:8px;">
-    ✅ {chem['name']} <span style="font-size:0.8em;opacity:0.85;">({chem['type']})</span>
-  </div>
+  <div style="font-size:1.05em;font-weight:700;margin-bottom:8px;">✅ {chem['name']} <span style="font-size:0.8em;opacity:0.85;">({chem['type']})</span></div>
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:0.92em;">
     <div>🎯 <b>Targets:</b> {', '.join(chem['targets'])}</div>
     <div>⏰ <b>Timing:</b> {chem['timing']}</div>
-    <div>🧪 <b>Dose per Litre:</b> <span style="color:#b9f6ca;font-weight:700;">{chem['dose_per_litre']}</span></div>
-    <div>🌾 <b>Dose per Acre:</b> <span style="color:#b9f6ca;font-weight:700;">{chem['dose_per_acre']}</span></div>
+    <div>🧪 <b>Dose/Litre:</b> <span style="color:#b9f6ca;font-weight:700;">{chem['dose_per_litre']}</span></div>
+    <div>🌾 <b>Dose/Acre:</b> <span style="color:#b9f6ca;font-weight:700;">{chem['dose_per_acre']}</span></div>
     <div>🔁 <b>Frequency:</b> {chem['frequency']}</div>
-    <div style="color:{yield_color};font-weight:700;">📈 Yield Gain if Applied: +{chem['yield_gain_pct']}%</div>
+    <div style="color:{yield_color};font-weight:700;">📈 Yield Gain: +{chem['yield_gain_pct']}%</div>
   </div>
   <div style="margin-top:8px;font-size:0.85em;opacity:0.85;">⚠️ {chem['safety']}</div>
 </div>""", unsafe_allow_html=True)
         else:
-            st.markdown('<div class="banner banner-yellow">⚠️ No chemical sprays recommended right now. Current weather conditions are unfavourable. Wait for conditions to improve.</div>', unsafe_allow_html=True)
+            st.markdown('<div class="banner banner-yellow">⚠️ No sprays recommended right now. Weather conditions are unfavourable.</div>', unsafe_allow_html=True)
 
         if chem_res["avoid"]:
             st.markdown('<div class="section-header">❌ Chemicals to AVOID in Current Weather</div>', unsafe_allow_html=True)
@@ -830,8 +858,8 @@ with tab4:
 
         st.markdown('<div class="section-header">📈 Expected Yield Impact</div>', unsafe_allow_html=True)
         if chem_res["recommended"]:
-            best     = chem_res["recommended"][0]
-            cur_p    = st.session_state.get("cur", 0)
+            best = chem_res["recommended"][0]
+            cur_p = st.session_state.get("cur", 0)
             gain_pct = best["yield_gain_pct"]
             gain_qtl = round(yield_qty * gain_pct / 100, 1)
             gain_val = round(gain_qtl * cur_p, 0) if cur_p else 0
@@ -842,8 +870,8 @@ with tab4:
   If you apply <b>{best['name']}</b> at the recommended dose:<br>
   • Expected yield gain: <b>+{gain_pct}%</b><br>
   • For your {yield_qty:.0f} Qtl crop: extra <b>+{gain_qtl} Qtl</b> output<br>
-  • Estimated extra revenue: <b>Rs.{gain_val:,.0f}</b> (at Rs.{cur_p_kg:.2f}/kg = Rs.{cur_p:,.0f}/Qtl)<br><br>
-  ⚠️ <i>Note: Yield gains are estimates. Actual results depend on soil, variety, and application timing.</i>
+  • Estimated extra revenue: <b>Rs.{gain_val:,.0f}</b> (at Rs.{cur_p_kg:.2f}/kg)<br><br>
+  ⚠️ <i>Yield gains are estimates. Actual results depend on soil, variety, and application timing.</i>
 </div>""", unsafe_allow_html=True)
 
     elif wd_chem and not wd_chem.get("success"):
@@ -869,7 +897,6 @@ with tab5:
         sub["Arrival_Date"] = pd.to_datetime(sub["Arrival_Date"])
         trend = sub.groupby("Arrival_Date")[["Modal_Price","Min_Price","Max_Price"]].mean().reset_index()
         trend = trend.sort_values("Arrival_Date").tail(120)
-
         trend["Modal_kg"] = trend["Modal_Price"] / 100
         trend["Min_kg"]   = trend["Min_Price"]   / 100
         trend["Max_kg"]   = trend["Max_Price"]   / 100
@@ -892,10 +919,8 @@ with tab5:
             plot_bgcolor="rgba(255,255,255,0.04)",
             paper_bgcolor="rgba(0,0,0,0)",
             font=dict(color="#e0e0e0"),
-            hovermode=False,
-            dragmode=False,
-            xaxis=dict(fixedrange=True),
-            yaxis=dict(fixedrange=True),
+            hovermode=False, dragmode=False,
+            xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True),
         )
         st.plotly_chart(fig2, use_container_width=True, config={"displayModeBar": False, "staticPlot": True, "scrollZoom": False})
 
@@ -915,9 +940,367 @@ with tab5:
         top_dist.columns = ["District", "Avg Price (Rs./Qtl)"]
         top_dist["Avg Price (Rs./Qtl)"] = top_dist["Avg Price (Rs./Qtl)"].round(0).astype(int)
         st.dataframe(top_dist.set_index("District"), use_container_width=True)
-
     else:
         st.info(f"No data found for {t_crop} in {t_dist}.")
 
 
+# ══════════════════════════════════════════════
+# TAB 6 — CNN PLANT DISEASE & MANGO DETECTION
+# ══════════════════════════════════════════════
+with tab6:
+    st.markdown('<div class="section-header">📷 AI Plant Disease & Variety Detection</div>', unsafe_allow_html=True)
+    st.markdown("Identify crop diseases and mango varieties using CNN + Claude Vision AI.")
 
+    # ── Sub-tab selector ──────────────────────
+    detect_mode = st.radio(
+        "Select Detection Mode",
+        ["🍅 Tomato Early Blight Detection", "🥭 Mango Variety & Disease Detection"],
+        horizontal=True,
+        key="detect_mode_radio",
+    )
+    st.markdown("---")
+
+    # ══════════════════════════════
+    # TOMATO MODE
+    # ══════════════════════════════
+    if detect_mode == "🍅 Tomato Early Blight Detection":
+
+        if detector.cnn_available:
+            st.markdown('<div class="banner banner-green">🤖 <b>CNN Model Active</b> — MobileNetV2 trained for Tomato Early Blight (2 classes).<br>Upload a tomato leaf photo for instant detection.</div>', unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="banner banner-blue">🔍 <b>Claude Vision AI Mode</b> — CNN not trained yet.<br>Upload a tomato leaf and Claude AI will analyze it.<br>💡 Run <code>python train_cnn.py</code> after downloading PlantVillage dataset for offline CNN.</div>', unsafe_allow_html=True)
+
+        col_upload, col_options = st.columns([2, 1])
+        with col_upload:
+            st.markdown("#### 📸 Upload Tomato Leaf Photo")
+            t_uploaded = st.file_uploader("Clear photo of leaf, stem, or fruit",
+                                           type=["jpg","jpeg","png","webp"], key="tomato_upload",
+                                           help="Best: close-up, natural light, affected area visible")
+        with col_options:
+            st.markdown("#### ⚙️ Options")
+            t_district = st.selectbox("District (weather context)", TN_DISTRICTS,
+                                       index=TN_DISTRICTS.index(selected_district), key="t_district")
+            t_analyze  = st.button("🔬 Detect Tomato Disease", type="primary",
+                                    use_container_width=True, key="t_analyze_btn",
+                                    disabled=(t_uploaded is None))
+
+        if t_uploaded:
+            t_img = Image.open(t_uploaded)
+            c1, c2 = st.columns([1,1])
+            with c1: st.image(t_img, caption="Uploaded Tomato Photo", use_container_width=True)
+            with c2:
+                st.markdown(f"**File:** {t_uploaded.name}")
+                st.markdown(f"**Size:** {t_img.size[0]} × {t_img.size[1]} px")
+                if not t_analyze: st.info("👆 Click **Detect Tomato Disease** to analyze")
+
+        if t_analyze and t_uploaded:
+            with st.spinner("🔬 Analyzing tomato image..."):
+                t_img = Image.open(t_uploaded)
+                t_weather = {}
+                try:
+                    wd_t = get_weather(t_district)
+                    if wd_t.get("success"): t_weather = wd_t.get("avg_7day", {})
+                except Exception: pass
+                t_result = detector.predict_from_file(t_img, crop_hint="Tomato")
+                st.session_state["tomato_result"]  = t_result
+                st.session_state["tomato_weather"] = t_weather
+                st.session_state["tomato_district"] = t_district
+
+        if st.session_state.get("tomato_result"):
+            result  = st.session_state["tomato_result"]
+            t_wx    = st.session_state.get("tomato_weather", {})
+            disease = result.get("disease_detected", "Unknown")
+            severity= result.get("severity", "Unknown")
+            conf    = result.get("confidence_pct", 0)
+            is_ok   = detector.is_healthy(result)
+            sev_cls = {"None":"cnn-healthy","Low":"cnn-result-card","Medium":"cnn-warning","High":"cnn-disease","Very High":"cnn-disease"}.get(severity, "cnn-result-card")
+            sev_icon= {"None":"✅","Low":"🟡","Medium":"🟠","High":"🔴","Very High":"🚨"}.get(severity, "⚠️")
+            src_lbl = "🤖 CNN" if result.get("source") == "cnn" else "🔍 Claude Vision"
+            tamil   = result.get("tamil_name","")
+
+            st.markdown("---")
+            st.markdown('<div class="section-header">🔬 Tomato Detection Results</div>', unsafe_allow_html=True)
+            st.markdown(f"""
+<div class="cnn-result-card {sev_cls}">
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:16px;margin-bottom:12px;">
+    <div><div style="font-size:0.78em;opacity:0.7;">🌱 Crop</div><div style="font-size:1.15em;font-weight:700;">Tomato</div></div>
+    <div><div style="font-size:0.78em;opacity:0.7;">🦠 Disease</div><div style="font-size:1.1em;font-weight:700;">{disease}</div>{'<div style="font-size:0.82em;">🗣️ '+tamil+'</div>' if tamil else ''}</div>
+    <div><div style="font-size:0.78em;opacity:0.7;">{sev_icon} Severity</div><div style="font-size:1.15em;font-weight:700;">{severity}</div></div>
+    <div><div style="font-size:0.78em;opacity:0.7;">📊 Confidence</div><div style="font-size:1.15em;font-weight:700;">{conf:.0f}%</div><div style="font-size:0.72em;opacity:0.7;">{src_lbl}</div></div>
+  </div>
+  <div style="font-size:0.84em;opacity:0.8;">📉 Yield risk: <b>{result.get('yield_impact','Unknown')}</b></div>
+</div>""", unsafe_allow_html=True)
+
+            top2 = result.get("top2_predictions", [])
+            if top2:
+                st.markdown("**CNN Class Probabilities:**")
+                for i, p in enumerate(top2):
+                    lbl = p["label"].replace("___"," → ").replace("_"," ")
+                    pc  = p["confidence"] * 100
+                    bc  = "#69f0ae" if i == 0 else "#ffd740"
+                    st.markdown(f'<div style="margin:3px 0;font-size:0.9em;"><span style="display:inline-block;width:230px;">{i+1}. {lbl}</span><span style="display:inline-block;width:{int(pc)}px;height:11px;background:{bc};border-radius:4px;vertical-align:middle;"></span> <span>{pc:.1f}%</span></div>', unsafe_allow_html=True)
+
+            c_diag, c_act = st.columns(2, gap="medium")
+            with c_diag:
+                st.markdown("#### 💡 Diagnosis")
+                st.markdown(f'<div class="solution-panel">{result.get("diagnosis","")}</div>', unsafe_allow_html=True)
+            with c_act:
+                st.markdown("#### ✅ Immediate Action")
+                st.markdown(f'<div class="reco-panel">{result.get("immediate_action","")}</div>', unsafe_allow_html=True)
+
+            if result.get("chemicals") and not is_ok:
+                st.markdown('<div class="section-header">💊 Treatment</div>', unsafe_allow_html=True)
+                for ch in result["chemicals"]:
+                    st.markdown(f'<div class="banner banner-green"><b>💊 {ch["name"]}</b><br>🧪 {ch["dose"]} &nbsp; 🔁 {ch["frequency"]}</div>', unsafe_allow_html=True)
+
+            if result.get("prevention"):
+                st.markdown(f'<div class="banner banner-blue">🛡️ <b>Prevention:</b><br>{result["prevention"]}</div>', unsafe_allow_html=True)
+
+            if t_wx and not is_ok:
+                st.markdown('<div class="section-header">🌦️ Weather Impact on Treatment</div>', unsafe_allow_html=True)
+                wx_warnings = []
+                if t_wx.get("rainfall", 0) > 40: wx_warnings.append(("banner-red", "🌧️ Heavy rainfall — delay foliar sprays."))
+                if t_wx.get("temp_max", 30) > 38: wx_warnings.append(("banner-red", f"🌡️ High temp {t_wx['temp_max']}°C — avoid copper/sulphur."))
+                if t_wx.get("humidity", 60) > 85: wx_warnings.append(("banner-yellow", f"💧 High humidity {t_wx['humidity']}% — apply fungicide preventively."))
+                if not wx_warnings: wx_warnings.append(("banner-green", "✅ Weather suitable for chemical application."))
+                for wc, wm in wx_warnings:
+                    st.markdown(f'<div class="banner {wc}">{wm}</div>', unsafe_allow_html=True)
+
+            if not is_ok:
+                st.markdown("---")
+                if st.button("🤖 Get Full AI Advisor Analysis", key="tomato_to_ai"):
+                    st.session_state["shared_problem_input"] = f"My Tomato plant has {disease}. {result.get('symptoms_visible','')[:250]}"
+                    st.success("✅ Switch to **🤖 AI Advisor** tab and click Analyze My Problem.")
+
+        elif not t_uploaded:
+            st.markdown("---")
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown("""
+#### 📸 Photo Tips
+- ✅ Natural daylight, close-up of affected leaf
+- ✅ Both sides of leaf visible
+- ❌ No blurry or dark photos
+""")
+            with c2:
+                st.markdown("""
+#### 🍅 Detects
+✅ Tomato Early Blight (*Alternaria solani*)
+✅ Healthy Tomato Leaf
+
+**Symptoms:** dark concentric-ring spots, yellow halos, defoliation on older leaves
+""")
+            if not detector.cnn_available:
+                with st.expander("🛠️ Train CNN for faster offline detection", expanded=False):
+                    st.markdown("""
+```bash
+# 1. Install TensorFlow
+pip install tensorflow pillow numpy
+
+# 2. Download PlantVillage dataset from Kaggle
+# https://www.kaggle.com/datasets/emmarex/plantdisease
+# Keep only: Tomato___Early_blight/ and Tomato___healthy/ in PlantVillage/
+
+# 3. Train
+cd D:/Agri_Assist
+python train_cnn.py
+```
+Expected accuracy: ~98%+ | GPU: ~5 min | CPU: ~30 min | Colab: ~3 min
+""")
+
+    # ══════════════════════════════
+    # MANGO MODE
+    # ══════════════════════════════
+    else:
+        st.markdown("""
+<div class="banner banner-mango">
+🥭 <b>Mango Variety & Disease Detection</b><br>
+Identifies <b>Alphonso (Hapus)</b> and <b>Imam Pasand (Himayuddin)</b> varieties
+and detects diseases like Anthracnose, Powdery Mildew, Hopper Damage, and Die-back.<br>
+{}
+</div>""".format(
+            "🤖 <b>CNN Model Active</b> — Upload a mango leaf or fruit photo for instant CNN detection." if mango_detector.cnn_available
+            else "🔍 <b>Claude Vision Mode</b> — Upload a mango photo and Claude AI will identify variety + disease."
+        ), unsafe_allow_html=True)
+
+        col_mu, col_mo = st.columns([2, 1])
+        with col_mu:
+            st.markdown("#### 📸 Upload Mango Photo")
+            m_uploaded = st.file_uploader(
+                "Upload a clear photo of mango leaf, fruit, or affected area",
+                type=["jpg","jpeg","png","webp"], key="mango_upload",
+                help="Best: close-up of leaf (both sides) or fruit showing disease symptoms",
+            )
+        with col_mo:
+            st.markdown("#### ⚙️ Options")
+            m_district = st.selectbox("District (weather context)", TN_DISTRICTS,
+                                       index=TN_DISTRICTS.index(selected_district), key="m_district")
+            m_analyze  = st.button("🔬 Detect Mango Variety & Disease", type="primary",
+                                    use_container_width=True, key="m_analyze_btn",
+                                    disabled=(m_uploaded is None))
+
+        if m_uploaded:
+            m_img = Image.open(m_uploaded)
+            c1, c2 = st.columns([1, 1])
+            with c1: st.image(m_img, caption="Uploaded Mango Photo", use_container_width=True)
+            with c2:
+                st.markdown(f"**File:** {m_uploaded.name}")
+                st.markdown(f"**Size:** {m_img.size[0]} × {m_img.size[1]} px")
+                if not m_analyze: st.info("👆 Click **Detect Mango Variety & Disease** to analyze")
+
+        if m_analyze and m_uploaded:
+            with st.spinner("🥭 Identifying mango variety and checking for diseases..."):
+                m_img = Image.open(m_uploaded)
+                m_weather = {}
+                try:
+                    wd_m = get_weather(m_district)
+                    if wd_m.get("success"): m_weather = wd_m.get("avg_7day", {})
+                except Exception: pass
+                m_result = mango_detector.predict_from_file(m_img, crop_hint="Mango")
+                st.session_state["mango_result"]   = m_result
+                st.session_state["mango_weather"]  = m_weather
+                st.session_state["mango_district"] = m_district
+
+        if st.session_state.get("mango_result"):
+            mr       = st.session_state["mango_result"]
+            m_wx     = st.session_state.get("mango_weather", {})
+            variety  = mr.get("variety_identified", "Unknown")
+            health   = mr.get("health_status", "Unknown")
+            disease  = mr.get("disease_detected", "Unknown")
+            severity = mr.get("severity", "Unknown")
+            conf     = mr.get("confidence_pct", 0)
+            vconf    = mr.get("variety_confidence", "Medium")
+            is_ok    = mango_detector.is_healthy(mr)
+            src_lbl  = "🤖 CNN" if mr.get("source") == "cnn" else "🔍 Claude Vision"
+            sev_icon = {"None":"✅","Low":"🟡","Medium":"🟠","High":"🔴","Very High":"🚨"}.get(severity,"⚠️")
+            card_cls = "mango-healthy" if is_ok else "mango-diseased"
+            tamil    = mr.get("tamil_name","")
+
+            st.markdown("---")
+            st.markdown('<div class="section-header">🥭 Mango Detection Results</div>', unsafe_allow_html=True)
+
+            # Main result card
+            st.markdown(f"""
+<div class="mango-card {card_cls}">
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr;gap:12px;margin-bottom:14px;">
+    <div><div style="font-size:0.78em;opacity:0.7;">🥭 Variety</div><div style="font-size:1.15em;font-weight:700;">{variety}</div><div style="font-size:0.72em;opacity:0.7;">Confidence: {vconf}</div></div>
+    <div><div style="font-size:0.78em;opacity:0.7;">💚 Status</div><div style="font-size:1.15em;font-weight:700;">{health}</div></div>
+    <div><div style="font-size:0.78em;opacity:0.7;">🦠 Disease</div><div style="font-size:1.1em;font-weight:700;">{disease}</div>{'<div style="font-size:0.78em;">🗣️ '+tamil+'</div>' if tamil else ''}</div>
+    <div><div style="font-size:0.78em;opacity:0.7;">{sev_icon} Severity</div><div style="font-size:1.15em;font-weight:700;">{severity}</div></div>
+    <div><div style="font-size:0.78em;opacity:0.7;">📊 Confidence</div><div style="font-size:1.15em;font-weight:700;">{conf:.0f}%</div><div style="font-size:0.72em;opacity:0.7;">{src_lbl}</div></div>
+  </div>
+  <div style="font-size:0.84em;opacity:0.8;">📉 Yield impact: <b>{mr.get('yield_impact','Unknown')}</b> &nbsp;|&nbsp; 💰 Market price: <b>{mr.get('market_price_range','—')}</b></div>
+</div>""", unsafe_allow_html=True)
+
+            # CNN top predictions bar chart
+            top_preds = mr.get("top_predictions", [])
+            if top_preds:
+                st.markdown("**CNN Class Probabilities:**")
+                for i, p in enumerate(top_preds):
+                    lbl = p["label"].replace("_", " ")
+                    pc  = p["confidence"] * 100
+                    bc  = "#ffcc02" if i == 0 else "#ffd740" if i == 1 else "#90caf9"
+                    st.markdown(f'<div style="margin:3px 0;font-size:0.88em;"><span style="display:inline-block;width:260px;">{i+1}. {lbl}</span><span style="display:inline-block;width:{int(pc)}px;height:11px;background:{bc};border-radius:4px;vertical-align:middle;"></span> <span>{pc:.1f}%</span></div>', unsafe_allow_html=True)
+                st.markdown("")
+
+            # Diagnosis + Action
+            c_diag, c_act = st.columns(2, gap="medium")
+            with c_diag:
+                st.markdown("#### 💡 Diagnosis")
+                st.markdown(f'<div class="solution-panel">{mr.get("diagnosis","")}</div>', unsafe_allow_html=True)
+            with c_act:
+                st.markdown("#### ✅ Immediate Action")
+                st.markdown(f'<div class="reco-panel">{mr.get("immediate_action","")}</div>', unsafe_allow_html=True)
+
+            # Variety-specific tips
+            if mr.get("variety_tips"):
+                st.markdown(f'<div class="banner banner-mango">🥭 <b>Variety Tips — {variety}:</b><br>{mr["variety_tips"]}</div>', unsafe_allow_html=True)
+
+            # Chemicals
+            if mr.get("chemicals") and not is_ok:
+                st.markdown('<div class="section-header">💊 Treatment Plan</div>', unsafe_allow_html=True)
+                for ch in mr["chemicals"]:
+                    if ch.get("name"):
+                        st.markdown(f'<div class="banner banner-orange"><b>💊 {ch["name"]}</b><br>🧪 Dose: <b>{ch["dose"]}</b> &nbsp; 🔁 {ch["frequency"]}</div>', unsafe_allow_html=True)
+
+            # Prevention
+            if mr.get("prevention"):
+                st.markdown(f'<div class="banner banner-blue">🛡️ <b>Prevention:</b><br>{mr["prevention"]}</div>', unsafe_allow_html=True)
+
+            # Weather warnings
+            if m_wx and not is_ok:
+                st.markdown('<div class="section-header">🌦️ Weather Impact on Treatment</div>', unsafe_allow_html=True)
+                wx_msgs = []
+                if m_wx.get("rainfall", 0) > 40:  wx_msgs.append(("banner-red", "🌧️ Heavy rainfall — delay all foliar sprays. Apply only soil drenches."))
+                if m_wx.get("temp_max", 30) > 38:  wx_msgs.append(("banner-red", f"🌡️ High temp ({m_wx['temp_max']}°C) — avoid copper-based sprays (phytotoxic at high temp)."))
+                if m_wx.get("humidity", 60) > 80:  wx_msgs.append(("banner-yellow", f"💧 High humidity ({m_wx['humidity']}%) — Anthracnose risk HIGH. Spray preventive fungicide."))
+                if not wx_msgs: wx_msgs.append(("banner-green", "✅ Weather conditions are suitable for spraying. Apply in early morning or evening."))
+                for wc, wm in wx_msgs:
+                    st.markdown(f'<div class="banner {wc}">{wm}</div>', unsafe_allow_html=True)
+
+            if not is_ok:
+                st.markdown("---")
+                if st.button("🤖 Get Full AI Advisor Analysis for This Disease", key="mango_to_ai"):
+                    st.session_state["shared_problem_input"] = f"My {variety} mango has {disease}. {mr.get('symptoms_visible','')[:250]}"
+                    st.success("✅ Switch to **🤖 AI Advisor** tab and click Analyze My Problem.")
+
+        elif not m_uploaded:
+            st.markdown("---")
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown("""
+#### 📸 Mango Photo Tips
+- ✅ Photograph affected **leaf (both sides)**
+- ✅ Include affected **fruits** if visible
+- ✅ Take in **natural outdoor light**
+- ✅ Show **stem/shoot tips** if die-back suspected
+- ❌ Avoid very distant shots of whole tree
+""")
+            with c2:
+                st.markdown("""
+#### 🥭 What This Detects
+
+**Alphonso (Hapus):**
+✅ Healthy leaf/fruit identification
+🔴 Anthracnose (black spots on fruit)
+🔴 Powdery Mildew (white coating)
+
+**Imam Pasand (Himayuddin):**
+✅ Healthy leaf/fruit identification
+🔴 Hopper Damage (curled leaves)
+🔴 Die-back (brown shoot tips)
+🔴 Stem-end Rot
+""")
+
+            if not mango_detector.cnn_available:
+                with st.expander("🛠️ Train Mango CNN for faster offline detection", expanded=False):
+                    st.markdown("""
+### Step 1 — Collect Dataset
+
+Create this folder structure in `D:/Agri_Assist/MangoDataset/`:
+```
+MangoDataset/
+  Alphonso_Healthy/      ← 50-200 photos of healthy Alphonso leaves/fruits
+  Alphonso_Diseased/     ← 50-200 photos of diseased Alphonso
+  ImamPasand_Healthy/    ← 50-200 photos of healthy Imam Pasand
+  ImamPasand_Diseased/   ← 50-200 photos of diseased Imam Pasand
+```
+
+**Photo sources:**
+- Your own orchard photos (best!)
+- Kaggle: https://www.kaggle.com/datasets/warcoder/mango-leaf-disease-dataset (rename folders)
+- Google Images search for each variety
+
+### Step 2 — Train
+```bash
+cd D:/Agri_Assist
+python train_mango_cnn.py
+```
+
+**Training time:**
+- GPU (NVIDIA RTX): ~5–8 minutes
+- CPU only: ~40–60 minutes
+- Google Colab (free GPU): ~5 minutes ← recommended
+
+**Output:** `mango_variety_model.h5` — restart app to activate CNN mode.
+""")
